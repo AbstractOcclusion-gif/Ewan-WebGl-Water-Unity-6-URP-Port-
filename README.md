@@ -11,6 +11,8 @@
 
 ---
 
+![WebGL Water running in Unity 6 / URP — a tiled pool with a half-submerged ball, surface ripples and floor caustics](docs/screenshot.png)
+
 An interactive pool of water you can poke, ripple, and drop a ball into, with
 real-time caustics on the floor — running entirely on the GPU inside Unity.
 
