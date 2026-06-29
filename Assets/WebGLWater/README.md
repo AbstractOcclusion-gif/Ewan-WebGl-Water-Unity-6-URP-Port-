@@ -51,8 +51,6 @@ field. Everything is in plain Unity units (1 unit = the demo's unit).
   propagation and a more stable surface (at more GPU cost).
 - **Ripple Strength** — height a click/drag adds (deformation intensity).
 - **Ripple Radius** — size of a click/drag ripple.
-- **Caustic Smoothness** (0–4) — Gaussian blur radius on the caustic texture.
-  0 = original crisp look; ~1–2 softens it nicely.
 
 > Tip: "calm pond" = waveSpeed ~1.0, damping ~0.99, steps 2.  "energetic" =
 > waveSpeed 2.0, damping 0.997, steps 3–4, higher ripple strength.

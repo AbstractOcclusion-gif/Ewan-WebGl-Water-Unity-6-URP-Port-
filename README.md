@@ -21,12 +21,12 @@ real-time caustics on the floor — running entirely on the GPU inside Unity.
 - **In-shader ray tracing** — the water surface analytically reflects and
   refracts the pool, the ball, and a sky cubemap, exactly like the original.
 - **Projected caustics** — the water grid is projected onto the floor to compute
-  light focusing, with an optional Gaussian blur to soften them.
+  light focusing.
 - **Blob & rim shadows** — the ball casts a soft shadow; the pool rim self-shadows.
 - **Volume conservation** — the surface stays level no matter how hard you ripple it.
 - **Reusable orbit camera** — drag to orbit, scroll to zoom.
 - **Designer knobs** — wave speed, damping, sub-steps, ripple strength/radius,
-  caustic smoothness and reflection strength, all exposed in the inspector.
+  and reflection strength, all exposed in the inspector.
 - **Self-contained** — a one-click editor menu builds the whole scene, including
   a procedural sky cubemap and a fallback tile texture.
 
@@ -71,7 +71,6 @@ camera and the `Water Controller`.
 | **Steps Per Frame** (1–8) | Simulation sub-steps. More = faster, smoother propagation. |
 | **Ripple Strength / Radius** | Size and intensity of a click/drag ripple. |
 | **Conserve Volume** | Keeps the surface from drifting up/down as ripples are added. |
-| **Caustic Smoothness** (0–4) | Gaussian blur on the caustics. 0 = crisp original; ~1–2 softer. |
 | **Reflection Strength** (0–1) | On the water materials. 1 = original Fresnel; 0 = fully see-through. |
 
 > Presets — *calm pond:* waveSpeed ~1.0, damping ~0.99, steps 2.

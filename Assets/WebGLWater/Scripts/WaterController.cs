@@ -50,20 +50,13 @@ namespace WebGLWater
         [Tooltip("Keep total water volume constant so the surface doesn't drift up/down.")]
         public bool conserveVolume = true;
 
-        [Header("Caustics")]
-        public Shader causticBlurShader;
-        [Tooltip("Caustic blur radius in texels. 0 = off (crisp, original look).")]
-        [Range(0f, 0.02f)] public float causticSmoothness = 0.001f;
-
         [Header("Camera")]
         public OrbitCamera orbit;
 
         // runtime
         WaterSimulation _water;
         Material _causticMat;
-        Material _blurMat;
         RenderTexture _causticRT;
-        RenderTexture _causticTmp;
         RenderTexture _heightMip;
         CommandBuffer _cb;
 
@@ -100,9 +93,6 @@ namespace WebGLWater
                 name = "CausticTex"
             };
             _causticRT.Create();
-            _causticTmp = new RenderTexture(_causticRT.descriptor) { name = "CausticTmp" };
-            _causticTmp.Create();
-            if (causticBlurShader != null) _blurMat = new Material(causticBlurShader);
             _cb = new CommandBuffer { name = "WebGLWater.Caustics" };
 
             _heightMip = new RenderTexture(WaterSimulation.Resolution, WaterSimulation.Resolution, 0, RenderTextureFormat.RFloat)
@@ -140,7 +130,6 @@ namespace WebGLWater
         {
             _water?.Dispose();
             if (_causticRT != null) _causticRT.Release();
-            if (_causticTmp != null) _causticTmp.Release();
             if (_heightMip != null) _heightMip.Release();
             _cb?.Release();
         }
@@ -212,16 +201,6 @@ namespace WebGLWater
             _cb.SetRenderTarget(_causticRT);
             _cb.ClearRenderTarget(true, true, Color.clear);
             _cb.DrawMesh(waterMesh, Matrix4x4.identity, _causticMat, 0, 0);
-
-            // optional separable blur to soften the caustics
-            if (_blurMat != null && causticSmoothness > 0.00001f)
-            {
-                _cb.SetGlobalVector("_BlurDir", new Vector4(causticSmoothness, 0f, 0f, 0f));
-                _cb.Blit(_causticRT, _causticTmp, _blurMat, 0);
-                _cb.SetGlobalVector("_BlurDir", new Vector4(0f, causticSmoothness, 0f, 0f));
-                _cb.Blit(_causticTmp, _causticRT, _blurMat, 0);
-            }
-
             Graphics.ExecuteCommandBuffer(_cb);
             Shader.SetGlobalTexture(ID_Caustic, _causticRT);
         }

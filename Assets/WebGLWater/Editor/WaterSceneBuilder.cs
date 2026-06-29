@@ -34,7 +34,6 @@ namespace WebGLWater.EditorTools
             var sfPool   = Shader.Find("WebGLWater/PoolWall");
             var sfSphere = Shader.Find("WebGLWater/WaterSphere");
             var sfCaust  = Shader.Find("WebGLWater/Caustics");
-            var sfBlur   = Shader.Find("WebGLWater/CausticBlur");
             var compute  = AssetDatabase.LoadAssetAtPath<ComputeShader>(Root + "/Shaders/WaterSim.compute");
 
             if (sfWater == null || sfSphere == null || sfCaust == null || compute == null)
@@ -105,7 +104,6 @@ namespace WebGLWater.EditorTools
             var ctrl = ctrlGO.AddComponent<WaterController>();
             ctrl.simCompute = compute;
             ctrl.causticsShader = sfCaust;
-            ctrl.causticBlurShader = sfBlur;
             ctrl.waterMesh = gridMesh;
             ctrl.targetCamera = cam;
             ctrl.orbit = orbit;
