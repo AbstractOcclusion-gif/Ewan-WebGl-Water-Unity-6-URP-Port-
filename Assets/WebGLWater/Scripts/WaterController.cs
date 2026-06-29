@@ -53,7 +53,7 @@ namespace WebGLWater
         [Header("Caustics")]
         public Shader causticBlurShader;
         [Tooltip("Caustic blur radius in texels. 0 = off (crisp, original look).")]
-        [Range(0f, 4f)] public float causticSmoothness = 1.2f;
+        [Range(0f, 0.02f)] public float causticSmoothness = 0.001f;
 
         [Header("Camera")]
         public OrbitCamera orbit;
@@ -214,7 +214,7 @@ namespace WebGLWater
             _cb.DrawMesh(waterMesh, Matrix4x4.identity, _causticMat, 0, 0);
 
             // optional separable blur to soften the caustics
-            if (_blurMat != null && causticSmoothness > 0.001f)
+            if (_blurMat != null && causticSmoothness > 0.00001f)
             {
                 _cb.SetGlobalVector("_BlurDir", new Vector4(causticSmoothness, 0f, 0f, 0f));
                 _cb.Blit(_causticRT, _causticTmp, _blurMat, 0);
