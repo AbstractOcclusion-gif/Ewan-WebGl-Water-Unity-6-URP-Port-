@@ -12,8 +12,10 @@
 
 static const float PI = 3.141592653589793;
 
-// Both bound to RGBAFloat RenderTextures with enableRandomWrite = true.
-RWTexture2D<float4> Src;   // read source
+// Dst is a write-only storage texture; Src is sampled (read). Keeping the read
+// path as a sampled Texture2D instead of a read-write RWTexture2D is required by
+// the WebGPU backend, which only allows r32 formats as read-write storage.
+Texture2D<float4>   Src;   // previous state (read via Load)
 RWTexture2D<float4> Dst;   // write destination
 
 // Mip-mapped copy of the height channel; its top (1x1) mip is the mean height.
@@ -40,12 +42,15 @@ float  _SphereRadius;
 int Clamp1(int v)            { return clamp(v, 0, (int)_Size - 1); }
 int2 ClampC(int2 p)         { return int2(Clamp1(p.x), Clamp1(p.y)); }
 
+// Clamped texel fetch from the sampled source texture.
+float4 Read(int2 p)         { return Src.Load(int3(ClampC(p), 0)); }
+
 [numthreads(8, 8, 1)]
 void Drop(uint3 id : SV_DispatchThreadID)
 {
     int2 p = int2(id.xy);
     float2 coord = (p + 0.5) * _Delta;
-    float4 info = Src[p];
+    float4 info = Read(p);
 
     float drop = max(0.0, 1.0 - length(_Center * 0.5 + 0.5 - coord) / _Radius);
     drop = 0.5 - cos(drop * PI) * 0.5;
@@ -58,13 +63,13 @@ void Drop(uint3 id : SV_DispatchThreadID)
 void Update(uint3 id : SV_DispatchThreadID)
 {
     int2 p = int2(id.xy);
-    float4 info = Src[p];
+    float4 info = Read(p);
 
     float average = (
-        Src[ClampC(p + int2(-1, 0))].r +
-        Src[ClampC(p + int2( 0,-1))].r +
-        Src[ClampC(p + int2( 1, 0))].r +
-        Src[ClampC(p + int2( 0, 1))].r
+        Read(p + int2(-1, 0)).r +
+        Read(p + int2( 0,-1)).r +
+        Read(p + int2( 1, 0)).r +
+        Read(p + int2( 0, 1)).r
     ) * 0.25;
 
     // move velocity toward the neighbor average, attenuate, integrate height
@@ -79,10 +84,10 @@ void Update(uint3 id : SV_DispatchThreadID)
 void Normal(uint3 id : SV_DispatchThreadID)
 {
     int2 p = int2(id.xy);
-    float4 info = Src[p];
+    float4 info = Read(p);
 
-    float rx = Src[ClampC(p + int2(1, 0))].r;
-    float ry = Src[ClampC(p + int2(0, 1))].r;
+    float rx = Read(p + int2(1, 0)).r;
+    float ry = Read(p + int2(0, 1)).r;
 
     float3 dx = float3(_Delta.x, rx - info.r, 0.0);
     float3 dy = float3(0.0, ry - info.r, _Delta.y);
@@ -107,7 +112,7 @@ void Sphere(uint3 id : SV_DispatchThreadID)
 {
     int2 p = int2(id.xy);
     float2 coord = (p + 0.5) * _Delta;
-    float4 info = Src[p];
+    float4 info = Read(p);
 
     info.r += VolumeInSphere(_OldCenter, coord);
     info.r -= VolumeInSphere(_NewCenter, coord);
@@ -121,7 +126,7 @@ void Sphere(uint3 id : SV_DispatchThreadID)
 void Conserve(uint3 id : SV_DispatchThreadID)
 {
     int2 p = int2(id.xy);
-    float4 info = Src[p];
+    float4 info = Read(p);
     float mean = HeightMip.SampleLevel(sampler_HeightMip, float2(0.5, 0.5), 20.0).r;
     info.r -= mean;
     Dst[p] = info;

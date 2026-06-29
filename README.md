@@ -13,6 +13,10 @@
 
 ![WebGL Water running in Unity 6 / URP — a tiled pool with a half-submerged ball, surface ripples and floor caustics](docs/screenshot.png)
 
+**▶ [Live demo](https://abstractocclusionshowreel.web.app/projects/ewan-water.html)** —
+runs in the browser via Unity 6 **WebGPU** (needs a WebGPU-capable browser:
+Chrome / Edge, Safari 26+, or the latest Firefox).
+
 An interactive pool of water you can poke, ripple, and drop a ball into, with
 real-time caustics on the floor — running entirely on the GPU inside Unity.
 

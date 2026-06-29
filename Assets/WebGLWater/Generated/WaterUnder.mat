@@ -25,7 +25,7 @@ Material:
     m_TexEnvs: []
     m_Ints: []
     m_Floats:
-    - _Cull: 2
+    - _Cull: 1
     - _ReflectionStrength: 1
     - _Underwater: 1
     m_Colors: []
