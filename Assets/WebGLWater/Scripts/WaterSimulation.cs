@@ -10,7 +10,7 @@ namespace WebGLWater
         public const int Resolution = 256;
 
         readonly ComputeShader _cs;
-        readonly int _kDrop, _kUpdate, _kNormal, _kSphere, _kConserve;
+        readonly int _kDrop, _kUpdate, _kNormal, _kObstacle, _kConserve;
         readonly int _groups;
 
         RenderTexture _a; // current state (height, velocity, normal.x, normal.z)
@@ -25,7 +25,7 @@ namespace WebGLWater
             _kDrop   = cs.FindKernel("Drop");
             _kUpdate = cs.FindKernel("Update");
             _kNormal = cs.FindKernel("Normal");
-            _kSphere = cs.FindKernel("Sphere");
+            _kObstacle = cs.FindKernel("Obstacle");
             _kConserve = cs.FindKernel("Conserve");
             _groups = Resolution / 8;
 
@@ -82,12 +82,15 @@ namespace WebGLWater
             Dispatch(_kDrop);
         }
 
-        public void MoveSphere(Vector3 oldCenter, Vector3 newCenter, float radius)
+        /// <summary>Forces the surface by the change in submerged footprint
+        /// (prev - curr), generalising the old sphere displacement to any meshes.</summary>
+        public void ApplyObstacle(Texture prev, Texture curr, float strength, bool flipY)
         {
-            _cs.SetVector("_OldCenter", oldCenter);
-            _cs.SetVector("_NewCenter", newCenter);
-            _cs.SetFloat("_SphereRadius", radius);
-            Dispatch(_kSphere);
+            _cs.SetTexture(_kObstacle, "ObstaclePrev", prev);
+            _cs.SetTexture(_kObstacle, "ObstacleCurr", curr);
+            _cs.SetFloat("_ObstacleStrength", strength);
+            _cs.SetFloat("_ObstacleFlipY", flipY ? 1f : 0f);
+            Dispatch(_kObstacle);
         }
 
         public void StepSimulation(float waveSpeed = 2f, float damping = 0.995f)

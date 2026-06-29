@@ -28,6 +28,10 @@ namespace WebGLWater
         public float minDistance = 1.5f;
         public float maxDistance = 12f;
         public float zoomSpeed = 0.5f;
+        [Tooltip("Two-finger pinch zoom sensitivity (per pixel of finger spread).")]
+        public float pinchZoomSpeed = 0.02f;
+
+        float _lastPinchDist = -1f;
 
         static readonly int ID_Eye = Shader.PropertyToID("_Eye");
 
@@ -57,7 +61,47 @@ namespace WebGLWater
         {
             float scroll = ScrollDelta();
             if (Mathf.Abs(scroll) > 0.0001f) Zoom(scroll);
+            HandlePinch();
             Apply();
+        }
+
+        // Two-finger pinch -> zoom (spread fingers = zoom in).
+        void HandlePinch()
+        {
+            if (GetTwoTouches(out Vector2 a, out Vector2 b))
+            {
+                float d = Vector2.Distance(a, b);
+                if (_lastPinchDist > 0f) Zoom((d - _lastPinchDist) * pinchZoomSpeed);
+                _lastPinchDist = d;
+            }
+            else
+            {
+                _lastPinchDist = -1f;
+            }
+        }
+
+        static bool GetTwoTouches(out Vector2 a, out Vector2 b)
+        {
+            a = b = Vector2.zero;
+#if ENABLE_INPUT_SYSTEM
+            var ts = Touchscreen.current;
+            if (ts == null) return false;
+            int n = 0;
+            foreach (var t in ts.touches)
+            {
+                if (!t.press.isPressed) continue;
+                Vector2 pos = t.position.ReadValue();
+                if (n == 0) a = pos;
+                else if (n == 1) { b = pos; return true; }
+                n++;
+            }
+            return false;
+#else
+            if (Input.touchCount < 2) return false;
+            a = Input.GetTouch(0).position;
+            b = Input.GetTouch(1).position;
+            return true;
+#endif
         }
 
         void Apply()

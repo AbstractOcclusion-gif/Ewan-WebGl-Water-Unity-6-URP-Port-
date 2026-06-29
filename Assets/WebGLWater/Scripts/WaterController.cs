@@ -1,5 +1,5 @@
 // WebGL Water - main controller (Unity 6 / URP port)
-// Drives the simulation, caustics, sphere physics, mouse interaction and the
+// Drives the simulation, caustics, mouse interaction and the
 // orbiting camera. Port of main.js / renderer.js by Evan Wallace (MIT).
 //
 // Coordinate convention (identical to the original demo):
@@ -7,6 +7,7 @@
 //   - light points toward the light source; default normalize(2, 2, -1).
 using UnityEngine;
 using UnityEngine.Rendering;
+using Unity.Collections;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -19,20 +20,25 @@ namespace WebGLWater
         [Header("Assigned by the scene builder")]
         public ComputeShader simCompute;
         public Shader causticsShader;
+        public Shader obstacleShader;     // WebGLWater/ObstacleDepth - footprint of interactable objects
         public Mesh waterMesh;            // XY grid plane, [-1,1], shared with the water surface renderers
         public Camera targetCamera;
-        public Transform sphere;          // unit-sphere renderer; positioned at the sphere center
+        public Light sun;                 // directional light: drives water, caustics AND real shadows
 
         [Header("Look / surfaces")]
         public Texture tiles;             // pool tile albedo sampled by the water reflection (assign your own)
         public Cubemap sky;               // sky cubemap for above-water reflections
 
         [Header("Simulation")]
+        [Tooltip("Direction TOWARD the light. Auto-driven from 'sun' when one is assigned.")]
         public Vector3 lightDir = new Vector3(2f, 2f, -1f);
-        public float sphereRadius = 0.25f;
-        public Vector3 sphereStart = new Vector3(-0.4f, -0.75f, 0.2f);
         public int causticResolution = 1024;
-        public bool spherePhysics = false;
+
+        [Header("Object interaction")]
+        [Tooltip("How strongly submerged objects push the surface down.")]
+        [Range(0f, 0.5f)] public float obstacleStrength = 0.08f;
+        [Tooltip("Flip the obstacle map in Z if object ripples appear mirrored.")]
+        public bool obstacleFlipY = false;
 
         [Header("Ripple tuning")]
         [Tooltip("Propagation stiffness. Higher = faster waves. Stable up to ~2.0.")]
@@ -55,19 +61,22 @@ namespace WebGLWater
 
         // runtime
         WaterSimulation _water;
+        WaterObstacle _obstacle;
+
+        // CPU copy of the height field for buoyancy queries
+        Color[] _heightCpu;
+        bool _heightReady, _readbackInFlight;
+        const int SimRes = WaterSimulation.Resolution;
         Material _causticMat;
         RenderTexture _causticRT;
         RenderTexture _heightMip;
         CommandBuffer _cb;
 
-        Vector3 _center, _oldCenter, _velocity;
-        readonly Vector3 _gravity = new Vector3(0f, -4f, 0f);
         bool _paused;
 
         // interaction
-        const int MODE_NONE = -1, MODE_ADD_DROPS = 0, MODE_MOVE_SPHERE = 1, MODE_ORBIT = 2;
+        const int MODE_NONE = -1, MODE_ADD_DROPS = 0, MODE_ORBIT = 2;
         int _mode = MODE_NONE;
-        Vector3 _prevHit, _planeNormal;
         Vector2 _oldMouse;
 
         // shader global ids
@@ -76,14 +85,15 @@ namespace WebGLWater
         static readonly int ID_Tiles = Shader.PropertyToID("_Tiles");
         static readonly int ID_Sky = Shader.PropertyToID("_Sky");
         static readonly int ID_Light = Shader.PropertyToID("_LightDir");
-        static readonly int ID_SphereC = Shader.PropertyToID("_SphereCenter");
-        static readonly int ID_SphereR = Shader.PropertyToID("_SphereRadius");
 
         void OnEnable()
         {
             if (simCompute == null) { Debug.LogError("WaterController: simCompute not assigned."); enabled = false; return; }
 
             _water = new WaterSimulation(simCompute);
+
+            if (obstacleShader != null)
+                _obstacle = new WaterObstacle(obstacleShader, WaterSimulation.Resolution, 0f);
 
             _causticMat = new Material(causticsShader);
             _causticRT = new RenderTexture(causticResolution, causticResolution, 0, RenderTextureFormat.ARGB32)
@@ -105,9 +115,6 @@ namespace WebGLWater
             };
             _heightMip.Create();
 
-            _center = _oldCenter = sphereStart;
-            _velocity = Vector3.zero;
-
             // seed the pool with a few ripples
             if (seedRipplesOnStart)
                 for (int i = 0; i < 20; i++)
@@ -120,8 +127,8 @@ namespace WebGLWater
                 targetCamera.farClipPlane = 100f;
             }
 
+            if (sun != null) lightDir = -sun.transform.forward; // light travels along sun.forward
             Shader.SetGlobalVector(ID_Light, lightDir.normalized);
-            Shader.SetGlobalFloat(ID_SphereR, sphereRadius);
             if (tiles != null) Shader.SetGlobalTexture(ID_Tiles, tiles);
             if (sky != null) Shader.SetGlobalTexture(ID_Sky, sky);
         }
@@ -129,6 +136,7 @@ namespace WebGLWater
         void OnDisable()
         {
             _water?.Dispose();
+            _obstacle?.Dispose();
             if (_causticRT != null) _causticRT.Release();
             if (_heightMip != null) _heightMip.Release();
             _cb?.Release();
@@ -142,44 +150,60 @@ namespace WebGLWater
             float dt = Time.deltaTime;
             if (!_paused) Step(dt);
 
-            // publish globals for the surface / pool / sphere shaders
+            // publish globals for the surface / pool shaders
+            if (sun != null) lightDir = -sun.transform.forward;
             Shader.SetGlobalTexture(ID_Water, _water.Texture);
             Shader.SetGlobalVector(ID_Light, lightDir.normalized);
-            Shader.SetGlobalVector(ID_SphereC, _center);
-            Shader.SetGlobalFloat(ID_SphereR, sphereRadius);
-
-            if (sphere != null)
-            {
-                sphere.position = _center;
-                sphere.localScale = Vector3.one * sphereRadius;
-            }
 
             UpdateCaustics();
+            RequestHeightReadback();
+        }
+
+        // ---- height readback for buoyancy ----------------------------------
+        void RequestHeightReadback()
+        {
+            if (_readbackInFlight || _water == null) return;
+            if (!SystemInfo.supportsAsyncGPUReadback) return; // buoyancy degrades gracefully
+            _readbackInFlight = true;
+            AsyncGPUReadback.Request(_water.Texture, 0, TextureFormat.RGBAFloat, OnHeightReadback);
+        }
+
+        void OnHeightReadback(AsyncGPUReadbackRequest req)
+        {
+            _readbackInFlight = false;
+            if (req.hasError) return;
+            var data = req.GetData<Color>();
+            if (_heightCpu == null || _heightCpu.Length != data.Length)
+                _heightCpu = new Color[data.Length];
+            data.CopyTo(_heightCpu);
+            _heightReady = true;
+        }
+
+        /// <summary>World-space height (Y) of the water surface at pool position
+        /// (x,z in [-1,1]). Returns false until the first readback has landed or if
+        /// the point is outside the pool.</summary>
+        public bool TryGetWaterHeight(float x, float z, out float height)
+        {
+            height = 0f;
+            if (!_heightReady || _heightCpu == null) return false;
+            float u = x * 0.5f + 0.5f, v = z * 0.5f + 0.5f;
+            if (u < 0f || u > 1f || v < 0f || v > 1f) return false;
+            int px = Mathf.Clamp((int)(u * SimRes), 0, SimRes - 1);
+            int pz = Mathf.Clamp((int)(v * SimRes), 0, SimRes - 1);
+            height = _heightCpu[pz * SimRes + px].r; // surface sits at y = 0 + displacement
+            return true;
         }
 
         void Step(float seconds)
         {
             if (seconds > 1f) return;
 
-            if (_mode == MODE_MOVE_SPHERE)
+            // Push the surface with the live submerged footprint of interactable objects.
+            if (_obstacle != null)
             {
-                _velocity = Vector3.zero;
+                _obstacle.Render(0f);
+                _water.ApplyObstacle(_obstacle.Prev, _obstacle.Curr, obstacleStrength, obstacleFlipY);
             }
-            else if (spherePhysics)
-            {
-                float percentUnderWater = Mathf.Clamp01((sphereRadius - _center.y) / (2f * sphereRadius));
-                _velocity += _gravity * (seconds - 1.1f * seconds * percentUnderWater);
-                _velocity -= _velocity.normalized * (percentUnderWater * seconds * Vector3.Dot(_velocity, _velocity));
-                _center += _velocity * seconds;
-                if (_center.y < sphereRadius - 1f)
-                {
-                    _center.y = sphereRadius - 1f;
-                    _velocity.y = Mathf.Abs(_velocity.y) * 0.7f;
-                }
-            }
-
-            _water.MoveSphere(_oldCenter, _center, sphereRadius);
-            _oldCenter = _center;
 
             int steps = Mathf.Max(1, stepsPerFrame);
             for (int i = 0; i < steps; i++)
@@ -214,6 +238,9 @@ namespace WebGLWater
         // ---- interaction ----------------------------------------------------
         void HandleMouse()
         {
+            // While pinching (2+ fingers), don't ripple/orbit — let the camera zoom.
+            if (MultiTouch()) { _mode = MODE_NONE; return; }
+
             Vector2 m = MousePos();
 
             if (MouseDown())
@@ -224,15 +251,8 @@ namespace WebGLWater
                 Vector3 d = ray.direction;
 
                 Vector3 pointOnPlane = eye + d * (-eye.y / d.y); // intersect y = 0
-                float st = IntersectSphere(eye, d, _center, sphereRadius);
 
-                if (st < 1e6f)
-                {
-                    _mode = MODE_MOVE_SPHERE;
-                    _prevHit = eye + d * st;
-                    _planeNormal = -targetCamera.transform.forward;
-                }
-                else if (Mathf.Abs(pointOnPlane.x) < 1f && Mathf.Abs(pointOnPlane.z) < 1f)
+                if (Mathf.Abs(pointOnPlane.x) < 1f && Mathf.Abs(pointOnPlane.z) < 1f)
                 {
                     _mode = MODE_ADD_DROPS;
                     DuringDrag(m);
@@ -264,19 +284,6 @@ namespace WebGLWater
                     _water.AddDrop(p.x, p.z, rippleRadius, rippleStrength);
                     break;
                 }
-                case MODE_MOVE_SPHERE:
-                {
-                    Ray ray = PixelRay(m);
-                    Vector3 eye = ray.origin, d = ray.direction;
-                    float t = -Vector3.Dot(_planeNormal, eye - _prevHit) / Vector3.Dot(_planeNormal, d);
-                    Vector3 nextHit = eye + d * t;
-                    _center += nextHit - _prevHit;
-                    _center.x = Mathf.Clamp(_center.x, sphereRadius - 1f, 1f - sphereRadius);
-                    _center.y = Mathf.Clamp(_center.y, sphereRadius - 1f, 10f);
-                    _center.z = Mathf.Clamp(_center.z, sphereRadius - 1f, 1f - sphereRadius);
-                    _prevHit = nextHit;
-                    break;
-                }
                 case MODE_ORBIT:
                 {
                     if (orbit != null) orbit.Rotate(m.x - _oldMouse.x, m.y - _oldMouse.y);
@@ -286,34 +293,26 @@ namespace WebGLWater
             _oldMouse = m;
         }
 
-        static float IntersectSphere(Vector3 origin, Vector3 ray, Vector3 c, float r)
-        {
-            Vector3 toSphere = origin - c;
-            float a = Vector3.Dot(ray, ray);
-            float b = 2f * Vector3.Dot(toSphere, ray);
-            float cc = Vector3.Dot(toSphere, toSphere) - r * r;
-            float disc = b * b - 4f * a * cc;
-            if (disc > 0f)
-            {
-                float t = (-b - Mathf.Sqrt(disc)) / (2f * a);
-                if (t > 0f) return t;
-            }
-            return 1e6f;
-        }
-
         void HandleKeys()
         {
             if (KeySpaceDown()) _paused = !_paused;
-            if (KeyGDown()) spherePhysics = !spherePhysics;
             if (KeyLHeld() && targetCamera != null)
-                lightDir = -targetCamera.transform.forward;
+            {
+                // Point the real sun along the camera view (or the fallback vector).
+                if (sun != null)
+                    sun.transform.rotation = Quaternion.LookRotation(targetCamera.transform.forward);
+                else
+                    lightDir = -targetCamera.transform.forward;
+            }
         }
 
-        // ---- input abstraction (works with new or legacy input) -------------
+        // ---- input abstraction (mouse, touch or pen via Pointer; legacy fallback) ---
+        // Pointer.current resolves to the mouse on desktop and the touchscreen on
+        // mobile, so the same drag logic drives both.
         static Vector2 MousePos()
         {
 #if ENABLE_INPUT_SYSTEM
-            return Mouse.current != null ? Mouse.current.position.ReadValue() : Vector2.zero;
+            return Pointer.current != null ? Pointer.current.position.ReadValue() : Vector2.zero;
 #else
             return Input.mousePosition;
 #endif
@@ -321,7 +320,7 @@ namespace WebGLWater
         static bool MouseDown()
         {
 #if ENABLE_INPUT_SYSTEM
-            return Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame;
+            return Pointer.current != null && Pointer.current.press.wasPressedThisFrame;
 #else
             return Input.GetMouseButtonDown(0);
 #endif
@@ -329,7 +328,7 @@ namespace WebGLWater
         static bool MouseHeld()
         {
 #if ENABLE_INPUT_SYSTEM
-            return Mouse.current != null && Mouse.current.leftButton.isPressed;
+            return Pointer.current != null && Pointer.current.press.isPressed;
 #else
             return Input.GetMouseButton(0);
 #endif
@@ -337,9 +336,25 @@ namespace WebGLWater
         static bool MouseUp()
         {
 #if ENABLE_INPUT_SYSTEM
-            return Mouse.current != null && Mouse.current.leftButton.wasReleasedThisFrame;
+            return Pointer.current != null && Pointer.current.press.wasReleasedThisFrame;
 #else
             return Input.GetMouseButtonUp(0);
+#endif
+        }
+
+        // True while two or more fingers are down, so single-touch ripple/orbit
+        // yields to the camera's pinch-zoom.
+        static bool MultiTouch()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var ts = Touchscreen.current;
+            if (ts == null) return false;
+            int n = 0;
+            foreach (var t in ts.touches)
+                if (t.press.isPressed) n++;
+            return n >= 2;
+#else
+            return Input.touchCount >= 2;
 #endif
         }
         static bool KeySpaceDown()
@@ -348,14 +363,6 @@ namespace WebGLWater
             return Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame;
 #else
             return Input.GetKeyDown(KeyCode.Space);
-#endif
-        }
-        static bool KeyGDown()
-        {
-#if ENABLE_INPUT_SYSTEM
-            return Keyboard.current != null && Keyboard.current.gKey.wasPressedThisFrame;
-#else
-            return Input.GetKeyDown(KeyCode.G);
 #endif
         }
         static bool KeyLHeld()

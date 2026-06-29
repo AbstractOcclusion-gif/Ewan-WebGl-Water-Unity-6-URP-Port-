@@ -26,6 +26,7 @@ Material:
     m_Ints: []
     m_Floats:
     - _Cull: 2
+    - _ObjectShadowStrength: 0.6
     m_Colors: []
   m_BuildTextureStacks: []
   m_AllowLocking: 1

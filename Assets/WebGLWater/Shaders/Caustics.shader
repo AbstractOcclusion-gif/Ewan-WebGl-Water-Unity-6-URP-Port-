@@ -2,8 +2,8 @@
 // Renders the water grid mesh into the caustic RenderTexture. The vertex shader
 // projects each water vertex along the refracted light onto the pool floor and
 // outputs clip-space position directly (no view/projection matrix). The fragment
-// shader brightens where the projected area shrinks (light focusing) and writes a
-// blob shadow for the sphere into the green channel.
+// shader brightens where the projected area shrinks (light focusing). The green
+// channel is left at 1.0 (no occluder shadow).
 //
 // Drawn manually from C# via CommandBuffer.DrawMesh with an identity matrix.
 Shader "WebGLWater/Caustics"
@@ -64,19 +64,10 @@ Shader "WebGLWater/Caustics"
                 // if the projected triangle gets smaller it gets brighter, and vice versa
                 float oldArea = length(ddx(i.oldPos)) * length(ddy(i.oldPos));
                 float newArea = length(ddx(i.newPos)) * length(ddy(i.newPos));
+                // green channel = occluder shadow term; 1.0 means unshadowed.
                 float4 col = float4(oldArea / newArea * 0.2, 1.0, 0.0, 0.0);
 
                 float3 refractedLight = refract(-_LightDir, float3(0.0, 1.0, 0.0), IOR_AIR / IOR_WATER);
-
-                // blob shadow: only shadow where the sphere blocks the light
-                float3 dir = (_SphereCenter - i.newPos) / _SphereRadius;
-                float3 area = cross(dir, refractedLight);
-                float shadow = dot(area, area);
-                float dist = dot(dir, -refractedLight);
-                shadow = 1.0 + (shadow - 1.0) / (0.05 + dist * 0.025);
-                shadow = clamp(1.0 / (1.0 + exp(-shadow)), 0.0, 1.0);
-                shadow = lerp(1.0, shadow, clamp(dist * 2.0, 0.0, 1.0));
-                col.g = shadow;
 
                 // shadow for the rim of the pool
                 float2 t = IntersectCube(i.newPos, -refractedLight, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));

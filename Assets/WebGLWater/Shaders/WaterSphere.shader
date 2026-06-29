@@ -1,51 +1,27 @@
-// WebGL Water - the draggable sphere (Unity 6 / URP port)
-// Positioned analytically from _SphereCenter / _SphereRadius, so the mesh must be
-// a unit-radius sphere (the scene builder generates one). The transform is only
-// used to keep the renderer's bounds near the sphere for frustum culling.
+// WebGL Water - DEPRECATED.
+// The draggable sphere was removed when the fake analytic ball was decommissioned
+// (replaced by real two-way object interaction). This file is now an inert stub
+// kept only so any lingering material reference still compiles; it can be safely
+// deleted from the Unity Project window (along with Generated/Sphere.mat and
+// Generated/UnitSphere.asset).
 Shader "WebGLWater/WaterSphere"
 {
-    Properties
-    {
-        [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull", Float) = 2 // Back
-    }
     SubShader
     {
         Tags { "RenderType" = "Opaque" "Queue" = "Geometry" }
         Pass
         {
-            Cull [_Cull]
             ZWrite On
-            ZTest LEqual
-
             CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma target 4.0
             #include "UnityCG.cginc"
-            #include "WaterCommon.hlsl"
 
             struct appdata { float4 vertex : POSITION; };
-            struct v2f
-            {
-                float4 pos      : SV_POSITION;
-                float3 position : TEXCOORD0;
-            };
+            struct v2f { float4 pos : SV_POSITION; };
 
-            v2f vert(appdata v)
-            {
-                v2f o;
-                o.position = _SphereCenter + v.vertex.xyz * _SphereRadius;
-                o.pos = mul(UNITY_MATRIX_VP, float4(o.position, 1.0));
-                return o;
-            }
-
-            fixed4 frag(v2f i) : SV_Target
-            {
-                float3 color = GetSphereColor(i.position);
-                float4 info = tex2D(_WaterTex, i.position.xz * 0.5 + 0.5);
-                if (i.position.y < info.r) color *= UNDERWATER_COLOR * 1.2;
-                return float4(color, 1.0);
-            }
+            v2f vert(appdata v) { v2f o; o.pos = UnityObjectToClipPos(v.vertex); return o; }
+            fixed4 frag(v2f i) : SV_Target { return fixed4(0.5, 0.5, 0.5, 1.0); }
             ENDCG
         }
     }

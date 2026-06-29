@@ -1,7 +1,7 @@
 // WebGL Water - one-click scene builder (Unity 6 / URP port)
 // Menu: Tools > WebGL Water > Build Scene
 //
-// Generates the grid + sphere meshes, a procedural sky cubemap (and a fallback
+// Generates the grid mesh, a procedural sky cubemap (and a fallback
 // tile texture), the materials, and wires up the camera + WaterController.
 // The analytic pool (walls/floor rendered by PoolWall.shader, which shows the
 // caustics) is OPTIONAL - leave it off if you've built your own pool.
@@ -30,13 +30,14 @@ namespace WebGLWater.EditorTools
                 AssetDatabase.CreateFolder(Root, "Generated");
 
             // ---- shaders ----
-            var sfWater  = Shader.Find("WebGLWater/WaterSurface");
-            var sfPool   = Shader.Find("WebGLWater/PoolWall");
-            var sfSphere = Shader.Find("WebGLWater/WaterSphere");
-            var sfCaust  = Shader.Find("WebGLWater/Caustics");
-            var compute  = AssetDatabase.LoadAssetAtPath<ComputeShader>(Root + "/Shaders/WaterSim.compute");
+            var sfWater    = Shader.Find("WebGLWater/WaterSurface");
+            var sfPool     = Shader.Find("WebGLWater/PoolWall");
+            var sfCaust    = Shader.Find("WebGLWater/Caustics");
+            var sfObstacle = Shader.Find("WebGLWater/ObstacleDepth");
+            var sfReceiver = Shader.Find("WebGLWater/WaterReceiver");
+            var compute    = AssetDatabase.LoadAssetAtPath<ComputeShader>(Root + "/Shaders/WaterSim.compute");
 
-            if (sfWater == null || sfSphere == null || sfCaust == null || compute == null)
+            if (sfWater == null || sfCaust == null || compute == null)
             {
                 EditorUtility.DisplayDialog("WebGL Water",
                     "Could not find the shaders / compute shader. Make sure the WebGLWater/Shaders folder imported without errors, then try again.",
@@ -46,7 +47,6 @@ namespace WebGLWater.EditorTools
 
             // ---- meshes ----
             var gridMesh   = SaveAsset(BuildGrid(GridDetail),     Gen + "/WaterGrid.asset");
-            var sphereMesh = SaveAsset(BuildUnitSphere(32, 24),   Gen + "/UnitSphere.asset");
 
             // ---- textures ----
             var sky   = SaveCubemap(BuildSky(128), Gen + "/SkyCubemap.cubemap");
@@ -57,7 +57,6 @@ namespace WebGLWater.EditorTools
                                         Gen + "/WaterAbove.mat");
             var matUnder = SaveMaterial(MakeMat(sfWater, m => { m.SetFloat("_Underwater", 1f); m.SetFloat("_Cull", 2f); }),
                                         Gen + "/WaterUnder.mat");
-            var matSphere = SaveMaterial(MakeMat(sfSphere, m => m.SetFloat("_Cull", 2f)), Gen + "/Sphere.mat");
             Material matPool = null;
             if (buildAnalyticPool && sfPool != null)
                 matPool = SaveMaterial(MakeMat(sfPool, m => m.SetFloat("_Cull", 2f)), Gen + "/Pool.mat");
@@ -68,13 +67,35 @@ namespace WebGLWater.EditorTools
             var above = CreateRenderer("Water (above)", gridMesh, matAbove, root.transform);
             var under = CreateRenderer("Water (under)", gridMesh, matUnder, root.transform);
 
-            var sphereGO = CreateRenderer("Sphere", sphereMesh, matSphere, root.transform);
-
             GameObject poolGO = null;
             if (matPool != null)
             {
                 poolGO = CreateRenderer("Analytic Pool", SaveAsset(BuildPool(), Gen + "/Pool.asset"), matPool, root.transform);
+                poolGO.GetComponent<MeshRenderer>().receiveShadows = true; // catch object shadows
             }
+
+            // ---- demo interaction: a floor to catch objects + a falling crate ----
+            // (Phase 3a shows the water reacting; Phase 3b buoyancy will make it float.)
+            var floor = new GameObject("Pool Floor Collider");
+            floor.transform.SetParent(root.transform);
+            floor.transform.position = new Vector3(0f, -1.05f, 0f);
+            floor.AddComponent<BoxCollider>().size = new Vector3(2f, 0.1f, 2f);
+
+            var crate = GameObject.CreatePrimitive(PrimitiveType.Cube); // brings a BoxCollider
+            crate.name = "Floating Crate (demo)";
+            crate.transform.SetParent(root.transform);
+            crate.transform.position = new Vector3(0.15f, 0.7f, -0.1f);
+            crate.transform.localScale = Vector3.one * 0.3f;
+            if (sfReceiver != null)
+            {
+                var crateMat = new Material(sfReceiver);
+                crateMat.SetColor("_BaseColor", new Color(0.82f, 0.52f, 0.30f));
+                crate.GetComponent<MeshRenderer>().sharedMaterial = crateMat;
+            }
+            var rb = crate.AddComponent<Rigidbody>();
+            rb.mass = 0.4f;
+            crate.AddComponent<WaterInteractable>();  // object -> water (displacement)
+            crate.AddComponent<WaterBuoyancy>();       // water -> object (floats)
 
             // camera - reuse the scene's main camera if there is one (avoids
             // two cameras rendering on top of each other).
@@ -98,16 +119,35 @@ namespace WebGLWater.EditorTools
             orbit.yaw = -200.5f;
             orbit.distance = 4f;
 
+            // planar reflection of the real scene across the water plane (y = 0).
+            // Tickable per-material via "Use Planar Reflection"; harmless if unused.
+            var planar = cam.GetComponent<PlanarReflection>();
+            if (planar == null) planar = cam.gameObject.AddComponent<PlanarReflection>();
+            planar.sourceCamera = cam;
+            planar.waterHeight = 0f;
+
+            // Single directional light: drives the analytic water + caustics (via the
+            // _LightDir global the controller publishes) AND casts real URP shadows.
+            var sunGO = new GameObject("Sun");
+            sunGO.transform.SetParent(root.transform);
+            var sun = sunGO.AddComponent<Light>();
+            sun.type = LightType.Directional;
+            sun.shadows = LightShadows.Soft;
+            sun.intensity = 1.2f;
+            // lightDir is "toward the light"; the light itself travels the opposite way.
+            sun.transform.rotation = Quaternion.LookRotation(-new Vector3(2f, 2f, -1f).normalized);
+
             // controller
             var ctrlGO = new GameObject("Water Controller");
             ctrlGO.transform.SetParent(root.transform);
             var ctrl = ctrlGO.AddComponent<WaterController>();
             ctrl.simCompute = compute;
             ctrl.causticsShader = sfCaust;
+            ctrl.obstacleShader = sfObstacle;
             ctrl.waterMesh = gridMesh;
             ctrl.targetCamera = cam;
+            ctrl.sun = sun;
             ctrl.orbit = orbit;
-            ctrl.sphere = sphereGO.transform;
             ctrl.tiles = tiles;
             ctrl.sky = sky;
 
@@ -162,40 +202,6 @@ namespace WebGLWater.EditorTools
             // Real geometry is displaced into the XZ plane in the shader, so use
             // explicit bounds covering the pool volume to avoid wrong frustum culling.
             mesh.bounds = new Bounds(Vector3.zero, new Vector3(3f, 3f, 3f));
-            return mesh;
-        }
-
-        static Mesh BuildUnitSphere(int longs, int lats)
-        {
-            var verts = new System.Collections.Generic.List<Vector3>();
-            var tris = new System.Collections.Generic.List<int>();
-            for (int y = 0; y <= lats; y++)
-            {
-                float v = y / (float)lats;
-                float theta = v * Mathf.PI;
-                for (int x = 0; x <= longs; x++)
-                {
-                    float u = x / (float)longs;
-                    float phi = u * Mathf.PI * 2f;
-                    verts.Add(new Vector3(
-                        Mathf.Sin(theta) * Mathf.Cos(phi),
-                        Mathf.Cos(theta),
-                        Mathf.Sin(theta) * Mathf.Sin(phi)));
-                }
-            }
-            int stride = longs + 1;
-            for (int y = 0; y < lats; y++)
-                for (int x = 0; x < longs; x++)
-                {
-                    int a = y * stride + x;
-                    int b = a + stride;
-                    tris.Add(a); tris.Add(a + 1); tris.Add(b);
-                    tris.Add(b); tris.Add(a + 1); tris.Add(b + 1);
-                }
-            var mesh = new Mesh { name = "UnitSphere" };
-            mesh.SetVertices(verts);
-            mesh.SetTriangles(tris, 0);
-            mesh.RecalculateNormals();
             return mesh;
         }
 
