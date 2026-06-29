@@ -35,6 +35,7 @@ Shader "WebGLWater/PoolWall"
             // Analytic helpers (GetWallColor etc). Uses legacy tex2D/sampler2D, which
             // resolve via the auto-included HLSLSupport in URP HLSLPROGRAM blocks.
             #include "WaterCommon.hlsl"
+            #include "WaterFog.hlsl"
 
             float _ObjectShadowStrength;
 
@@ -64,6 +65,9 @@ Shader "WebGLWater/PoolWall"
                 float4 shadowCoord = TransformWorldToShadowCoord(i.position);
                 Light mainLight = GetMainLight(shadowCoord);
                 color *= lerp(1.0, mainLight.shadowAttenuation, _ObjectShadowStrength);
+
+                // depth absorption (shared fog; pool surface sits at y = 0)
+                color = ApplyWaterFog(color, WaterPathLength(i.position, _WorldSpaceCameraPos, 0.0));
 
                 return half4(color, 1);
             }

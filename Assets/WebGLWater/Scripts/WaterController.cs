@@ -40,6 +40,32 @@ namespace WebGLWater
         [Tooltip("Flip the obstacle map in Z if object ripples appear mirrored.")]
         public bool obstacleFlipY = false;
 
+        [Header("Water fog (Beer-Lambert)")]
+        [Tooltip("Global depth absorption, shared by the surface, objects and pool.")]
+        public bool waterFog = false;
+        public Color fogColor = new Color(0.10f, 0.30f, 0.40f);
+        [Tooltip("Per-channel extinction; red highest so it absorbs first.")]
+        public Color fogExtinction = new Color(0.45f, 0.15f, 0.08f);
+        [Range(0f, 8f)] public float fogDensity = 2f;
+
+        [Header("Foam")]
+        public bool foam = false;
+        [Tooltip("How fast turbulence creates foam.")]
+        [Range(0f, 2f)] public float foamGenRate = 0.6f;
+        [Tooltip("Foam survival per step. Lower = fades faster.")]
+        [Range(0.80f, 1f)] public float foamDecay = 0.97f;
+        [Tooltip("Diffusion of foam toward neighbours.")]
+        [Range(0f, 1f)] public float foamSpread = 0.2f;
+        public float foamFromSpeed = 6f;
+        public float foamFromCurvature = 30f;
+        [Space]
+        public Color foamColor = Color.white;
+        [Range(0f, 2f)] public float foamStrength = 1f;
+        [Tooltip("Width of the foam band along the pool walls (pool units).")]
+        [Range(0f, 0.5f)] public float foamBorderWidth = 0.08f;
+        [Tooltip("Depth band for contact foam where objects meet the waterline.")]
+        [Range(0f, 0.5f)] public float foamContactDepth = 0.06f;
+
         [Header("Ripple tuning")]
         [Tooltip("Propagation stiffness. Higher = faster waves. Stable up to ~2.0.")]
         [Range(0.1f, 2.0f)] public float waveSpeed = 2.0f;
@@ -58,6 +84,10 @@ namespace WebGLWater
 
         [Header("Camera")]
         public OrbitCamera orbit;
+
+        [Header("Splash")]
+        [Tooltip("Shared splash emitter used for mouse interaction (and objects).")]
+        public WaterSplashEmitter splashEmitter;
 
         // runtime
         WaterSimulation _water;
@@ -78,6 +108,7 @@ namespace WebGLWater
         const int MODE_NONE = -1, MODE_ADD_DROPS = 0, MODE_ORBIT = 2;
         int _mode = MODE_NONE;
         Vector2 _oldMouse;
+        Vector3 _prevDrop;
 
         // shader global ids
         static readonly int ID_Water = Shader.PropertyToID("_WaterTex");
@@ -86,6 +117,16 @@ namespace WebGLWater
         static readonly int ID_Sky = Shader.PropertyToID("_Sky");
         static readonly int ID_Light = Shader.PropertyToID("_LightDir");
         static readonly int ID_SunColor = Shader.PropertyToID("_SunColor");
+        static readonly int ID_FogColor = Shader.PropertyToID("_WaterFogColor");
+        static readonly int ID_FogExt = Shader.PropertyToID("_WaterExtinction");
+        static readonly int ID_FogDensity = Shader.PropertyToID("_WaterFogDensity");
+        static readonly int ID_FogEnabled = Shader.PropertyToID("_WaterFogEnabled");
+        static readonly int ID_FoamMask = Shader.PropertyToID("_FoamMask");
+        static readonly int ID_FoamColor = Shader.PropertyToID("_FoamColor");
+        static readonly int ID_FoamEnabled = Shader.PropertyToID("_FoamEnabled");
+        static readonly int ID_FoamStrength = Shader.PropertyToID("_FoamStrength");
+        static readonly int ID_FoamBorder = Shader.PropertyToID("_FoamBorderWidth");
+        static readonly int ID_FoamContact = Shader.PropertyToID("_FoamContactDepth");
 
         void OnEnable()
         {
@@ -131,6 +172,7 @@ namespace WebGLWater
             if (sun != null) lightDir = -sun.transform.forward; // light travels along sun.forward
             Shader.SetGlobalVector(ID_Light, lightDir.normalized);
             Shader.SetGlobalColor(ID_SunColor, sun != null ? sun.color * sun.intensity : Color.white);
+            PublishFog();
             if (tiles != null) Shader.SetGlobalTexture(ID_Tiles, tiles);
             if (sky != null) Shader.SetGlobalTexture(ID_Sky, sky);
         }
@@ -157,6 +199,8 @@ namespace WebGLWater
             Shader.SetGlobalTexture(ID_Water, _water.Texture);
             Shader.SetGlobalVector(ID_Light, lightDir.normalized);
             Shader.SetGlobalColor(ID_SunColor, sun != null ? sun.color * sun.intensity : Color.white);
+            PublishFog();
+            PublishFoam();
 
             UpdateCaustics();
             RequestHeightReadback();
@@ -180,6 +224,12 @@ namespace WebGLWater
                 _heightCpu = new Color[data.Length];
             data.CopyTo(_heightCpu);
             _heightReady = true;
+        }
+
+        /// <summary>Inject a ripple at pool position (x,z in [-1,1]); used by splashes.</summary>
+        public void AddRipple(float x, float z, float radius, float strength)
+        {
+            _water?.AddDrop(x, z, radius, strength);
         }
 
         /// <summary>World-space height (Y) of the water surface at pool position
@@ -220,6 +270,9 @@ namespace WebGLWater
             }
 
             _water.UpdateNormals();
+
+            if (foam)
+                _water.StepFoam(foamGenRate, foamDecay, foamSpread, foamFromSpeed, foamFromCurvature);
         }
 
         void UpdateCaustics()
@@ -230,6 +283,25 @@ namespace WebGLWater
             _cb.DrawMesh(waterMesh, Matrix4x4.identity, _causticMat, 0, 0);
             Graphics.ExecuteCommandBuffer(_cb);
             Shader.SetGlobalTexture(ID_Caustic, _causticRT);
+        }
+
+        void PublishFog()
+        {
+            Shader.SetGlobalColor(ID_FogColor, fogColor);
+            Shader.SetGlobalColor(ID_FogExt, fogExtinction);
+            Shader.SetGlobalFloat(ID_FogDensity, fogDensity);
+            Shader.SetGlobalFloat(ID_FogEnabled, waterFog ? 1f : 0f);
+        }
+
+        void PublishFoam()
+        {
+            if (_water != null && _water.FoamTexture != null)
+                Shader.SetGlobalTexture(ID_FoamMask, _water.FoamTexture);
+            Shader.SetGlobalColor(ID_FoamColor, foamColor);
+            Shader.SetGlobalFloat(ID_FoamEnabled, foam ? 1f : 0f);
+            Shader.SetGlobalFloat(ID_FoamStrength, foamStrength);
+            Shader.SetGlobalFloat(ID_FoamBorder, foamBorderWidth);
+            Shader.SetGlobalFloat(ID_FoamContact, foamContactDepth);
         }
 
         // ---- camera ---------------------------------------------------------
@@ -258,6 +330,7 @@ namespace WebGLWater
                 if (Mathf.Abs(pointOnPlane.x) < 1f && Mathf.Abs(pointOnPlane.z) < 1f)
                 {
                     _mode = MODE_ADD_DROPS;
+                    _prevDrop = pointOnPlane;
                     DuringDrag(m);
                 }
                 else
@@ -285,6 +358,16 @@ namespace WebGLWater
                     Vector3 eye = ray.origin, d = ray.direction;
                     Vector3 p = eye + d * (-eye.y / d.y);
                     _water.AddDrop(p.x, p.z, rippleRadius, rippleStrength);
+
+                    // splash droplets where the cursor drags across the surface
+                    if (splashEmitter != null)
+                    {
+                        float moved = Vector2.Distance(new Vector2(p.x, p.z), new Vector2(_prevDrop.x, _prevDrop.z));
+                        float strength = Mathf.Clamp01(moved / 0.08f);
+                        if (strength > 0.1f)
+                            splashEmitter.EmitSplash(new Vector3(p.x, 0f, p.z), strength * 0.6f, rippleRadius * 4f);
+                    }
+                    _prevDrop = p;
                     break;
                 }
                 case MODE_ORBIT:

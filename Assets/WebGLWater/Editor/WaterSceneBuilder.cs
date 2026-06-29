@@ -96,6 +96,23 @@ namespace WebGLWater.EditorTools
             rb.mass = 0.4f;
             crate.AddComponent<WaterInteractable>();  // object -> water (displacement)
             crate.AddComponent<WaterBuoyancy>();       // water -> object (floats)
+            crate.AddComponent<WaterSplash>();         // droplet burst on impact
+
+            // ---- underwater god-ray volume (caustic-masked light shafts) ----
+            var sfGodRays = Shader.Find("WebGLWater/GodRays");
+            if (sfGodRays != null)
+            {
+                var god = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                god.name = "God Rays";
+                Object.DestroyImmediate(god.GetComponent<Collider>());
+                god.transform.SetParent(root.transform);
+                god.transform.position = new Vector3(0f, -0.5f, 0f);   // spans y in [-1, 0]
+                god.transform.localScale = new Vector3(2f, 1f, 2f);    // spans x,z in [-1, 1]
+                var gmr = god.GetComponent<MeshRenderer>();
+                gmr.sharedMaterial = new Material(sfGodRays);
+                gmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                gmr.receiveShadows = false;
+            }
 
             // camera - reuse the scene's main camera if there is one (avoids
             // two cameras rendering on top of each other).
@@ -137,6 +154,24 @@ namespace WebGLWater.EditorTools
             // lightDir is "toward the light"; the light itself travels the opposite way.
             sun.transform.rotation = Quaternion.LookRotation(-new Vector3(2f, 2f, -1f).normalized);
 
+            // Shared, fully editable splash particles (used by object impacts + mouse).
+            // Select "Splash Particles" to tune the system or swap the droplet texture.
+            var splashGO = new GameObject("Splash Particles");
+            splashGO.transform.SetParent(root.transform);
+            var splashPS = splashGO.AddComponent<ParticleSystem>();
+            WaterSplashEmitter.ConfigureForDrift(splashPS);
+            var splashPSR = splashGO.GetComponent<ParticleSystemRenderer>();
+            var sfSprite = Shader.Find("Sprites/Default");
+            if (sfSprite != null)
+            {
+                var dm = new Material(sfSprite) { mainTexture = LoadOrBuildDroplet(Gen + "/Droplet.png") };
+                dm.color = new Color(0.92f, 0.97f, 1f, 1f);
+                splashPSR.sharedMaterial = dm;
+            }
+            splashPSR.renderMode = ParticleSystemRenderMode.Billboard;
+            var splashEmitter = splashGO.AddComponent<WaterSplashEmitter>();
+            splashEmitter.particles = splashPS;
+
             // controller
             var ctrlGO = new GameObject("Water Controller");
             ctrlGO.transform.SetParent(root.transform);
@@ -148,6 +183,7 @@ namespace WebGLWater.EditorTools
             ctrl.targetCamera = cam;
             ctrl.sun = sun;
             ctrl.orbit = orbit;
+            ctrl.splashEmitter = splashEmitter;
             ctrl.tiles = tiles;
             ctrl.sky = sky;
 
@@ -304,6 +340,33 @@ namespace WebGLWater.EditorTools
             var imp = (TextureImporter)AssetImporter.GetAtPath(path);
             imp.wrapMode = TextureWrapMode.Repeat;
             imp.mipmapEnabled = true;
+            imp.SaveAndReimport();
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+        }
+
+        // Soft round droplet sprite for the splash particles (swap for your own).
+        static Texture2D LoadOrBuildDroplet(string path)
+        {
+            var existing = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+            if (existing != null) return existing;
+
+            const int s = 64;
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, true);
+            for (int y = 0; y < s; y++)
+                for (int x = 0; x < s; x++)
+                {
+                    float dx = (x + 0.5f) / s * 2f - 1f;
+                    float dy = (y + 0.5f) / s * 2f - 1f;
+                    float a = Mathf.Clamp01(1f - Mathf.Sqrt(dx * dx + dy * dy));
+                    a *= a; // soft round falloff
+                    tex.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+                }
+            tex.Apply();
+            File.WriteAllBytes(path, tex.EncodeToPNG());
+            AssetDatabase.ImportAsset(path);
+            var imp = (TextureImporter)AssetImporter.GetAtPath(path);
+            imp.alphaIsTransparency = true;
+            imp.wrapMode = TextureWrapMode.Clamp;
             imp.SaveAndReimport();
             return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
         }

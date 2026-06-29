@@ -25,6 +25,11 @@ Shader "WebGLWater/WaterSurface"
         [Header(Real Transparency)]
         [Toggle(_REAL_REFRACTION)] _RealRefraction ("Real (Screen-Space) Refraction", Float) = 0
         _RefractionDistortion ("Refraction Distortion", Range(0,0.2)) = 0.05
+        // Water fog is global now (driven by WaterController), shared with the
+        // object/pool shaders so it's consistent however you view the water.
+
+        [Header(Foam)]
+        _FoamTex ("Foam Pattern (optional)", 2D) = "white" {}
     }
     SubShader
     {
@@ -48,6 +53,7 @@ Shader "WebGLWater/WaterSurface"
             #pragma shader_feature_local _REAL_REFRACTION
             #include "UnityCG.cginc"
             #include "WaterCommon.hlsl"
+            #include "WaterFog.hlsl"
 
             float _Underwater;
             float _ReflectionStrength;
@@ -62,6 +68,14 @@ Shader "WebGLWater/WaterSurface"
 
             float _SSRStrength, _SSRStepSize, _SSRMaxSteps, _SSRThickness;
             float _RefractionDistortion;
+
+            // Foam: _FoamMask (sim buffer) + globals from the controller; _FoamTex
+            // is an optional per-material pattern (defaults white = flat foam).
+            sampler2D _FoamMask;
+            sampler2D _FoamTex;
+            float4 _FoamTex_ST;
+            float4 _FoamColor;
+            float _FoamEnabled, _FoamStrength, _FoamBorderWidth, _FoamContactDepth;
 
             // Screen-space ray march along 'dir' from world 'p0'. On a depth hit it
             // returns the scene colour and sets hit=1; otherwise hit=0 (caller falls
@@ -175,6 +189,12 @@ Shader "WebGLWater/WaterSurface"
                     float3 reflectedColor = getSurfaceRayColor(i.position, reflectedRay, UNDERWATER_COLOR);
                     float3 refractedColor = getSurfaceRayColor(i.position, refractedRay, float3(1.0, 1.0, 1.0)) * float3(0.8, 1.0, 1.1);
 
+                    // Real transparency from below: sample the live scene above the surface.
+                #if defined(_REAL_REFRACTION)
+                    float2 ruvU = i.screenPos.xy / max(i.screenPos.w, 1e-5) + normal.xz * _RefractionDistortion;
+                    refractedColor = tex2D(_CameraOpaqueTexture, saturate(ruvU)).rgb * float3(0.8, 1.0, 1.1);
+                #endif
+
                     float tUnder = (1.0 - fresnel) * length(refractedRay);
                     tUnder = lerp(1.0, tUnder, _ReflectionStrength); // strength 0 = fully refracted
                     return float4(lerp(reflectedColor, refractedColor, tUnder), 1.0);
@@ -199,14 +219,49 @@ Shader "WebGLWater/WaterSurface"
                 #endif
 
                     // ---- Real transparency: sample the actual scene behind the surface,
-                    // instead of the analytic pool. Beer-Lambert depth fog lands in Phase 4. ----
+                    // instead of the analytic pool. Depth fog is applied just below. ----
                 #if defined(_REAL_REFRACTION)
                     float2 ruv = i.screenPos.xy / max(i.screenPos.w, 1e-5);
                     ruv += normal.xz * _RefractionDistortion;
                     refractedColor = tex2D(_CameraOpaqueTexture, saturate(ruv)).rgb * ABOVEWATER_COLOR;
                 #endif
 
-                    return float4(lerp(refractedColor, reflectedColor, fresnel * _ReflectionStrength), 1.0);
+                    // ---- Water fog. With REAL refraction the sampled scene is already
+                    // fogged by the geometry shaders, so we only fog the ANALYTIC pool
+                    // here - avoids double-fogging what's seen through the surface. ----
+                #if !defined(_REAL_REFRACTION)
+                    float2 tfog = IntersectCube(i.position, refractedRay, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));
+                    refractedColor = ApplyWaterFog(refractedColor, max(0.0, tfog.y));
+                #endif
+
+                    float3 outColor = lerp(refractedColor, reflectedColor, fresnel * _ReflectionStrength);
+
+                    // ---- Foam: advected buffer + shoreline border + waterline contact ----
+                    if (_FoamEnabled > 0.5)
+                    {
+                        float2 fcoord = i.position.xz * 0.5 + 0.5;
+                        float advected = tex2D(_FoamMask, fcoord).r;
+
+                        // shoreline foam against the pool walls
+                        float edge = min(1.0 - abs(i.position.x), 1.0 - abs(i.position.z));
+                        float border = 1.0 - smoothstep(0.0, _FoamBorderWidth, edge);
+
+                        // contact foam where geometry pierces the waterline (needs depth tex;
+                        // degrades to no contact foam when it's unavailable)
+                        float2 suv = i.screenPos.xy / max(i.screenPos.w, 1e-5);
+                        float sceneEye = LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_CameraDepthTexture, float4(suv, 0, 0)));
+                        float surfEye  = -mul(UNITY_MATRIX_V, float4(i.position, 1.0)).z;
+                        float contact = 1.0 - saturate((sceneEye - surfEye) / max(_FoamContactDepth, 1e-4));
+
+                        float mask = saturate((advected + border + contact) * _FoamStrength);
+
+                        // appearance: optional tiling pattern, nudged by the ripple normal
+                        float2 fuv = fcoord * _FoamTex_ST.xy + _FoamTex_ST.zw + normal.xz * 0.1;
+                        float3 foamLook = _FoamColor.rgb * tex2D(_FoamTex, fuv).rgb;
+                        outColor = lerp(outColor, foamLook, mask);
+                    }
+
+                    return float4(outColor, 1.0);
                 }
             }
             ENDCG

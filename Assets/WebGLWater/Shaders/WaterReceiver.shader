@@ -34,6 +34,7 @@ Shader "WebGLWater/WaterReceiver"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #include "WaterFog.hlsl"
 
             TEXTURE2D(_BaseMap);    SAMPLER(sampler_BaseMap);
             TEXTURE2D(_CausticTex); SAMPLER(sampler_CausticTex);
@@ -84,6 +85,9 @@ Shader "WebGLWater/WaterReceiver"
                     color += albedo * _CausticTint.rgb * (caustic * _CausticStrength * mainLight.shadowAttenuation);
                     color *= _UnderwaterTint.rgb;
                 }
+
+                // depth absorption (shared with the surface so fog is consistent)
+                color = ApplyWaterFog(color, WaterPathLength(IN.positionWS, _WorldSpaceCameraPos, _WaterLevel));
                 return half4(color, 1);
             }
             ENDHLSL

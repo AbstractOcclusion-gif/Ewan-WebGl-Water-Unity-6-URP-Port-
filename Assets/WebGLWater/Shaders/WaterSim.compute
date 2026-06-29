@@ -8,6 +8,7 @@
 #pragma kernel Update
 #pragma kernel Normal
 #pragma kernel Obstacle
+#pragma kernel Foam
 #pragma kernel Conserve
 
 static const float PI = 3.141592653589793;
@@ -41,6 +42,16 @@ Texture2D<float4> ObstaclePrev;
 Texture2D<float4> ObstacleCurr;
 float _ObstacleStrength;
 float _ObstacleFlipY;   // 1 = flip V to match the sim's coordinate convention
+
+// Foam buffer (R = foam amount per column). Advected/diffused, generated from
+// surface turbulence, and decayed over time. Separate ping-pong from the height.
+Texture2D<float>    FoamSrc;   // RFloat (r32) - WebGPU-safe single channel
+RWTexture2D<float>  FoamDst;
+float _FoamGenRate;    // how fast turbulence creates foam
+float _FoamDecay;      // per-step survival (e.g. 0.97)
+float _FoamSpread;     // 0..1 diffusion toward neighbour average
+float _FoamFromSpeed;  // foam from |velocity|
+float _FoamFromCurv;   // foam from negative curvature (wave crests/chop)
 
 int Clamp1(int v)            { return clamp(v, 0, (int)_Size - 1); }
 int2 ClampC(int2 p)         { return int2(Clamp1(p.x), Clamp1(p.y)); }
@@ -115,6 +126,33 @@ void Obstacle(uint3 id : SV_DispatchThreadID)
     info.r += (prev - curr) * _ObstacleStrength;
 
     Dst[p] = info;
+}
+
+// Advected foam: spread toward the neighbour average, add foam where the surface
+// is agitated (fast-moving or sharply curved), then decay. Reads the height state
+// from Src (bound to the current height texture) and ping-pongs the foam buffer.
+[numthreads(8, 8, 1)]
+void Foam(uint3 id : SV_DispatchThreadID)
+{
+    int2 p = int2(id.xy);
+    float4 info = Read(p); // height/velocity/normal at this column
+
+    float fC = FoamSrc.Load(int3(ClampC(p), 0));
+    float fL = FoamSrc.Load(int3(ClampC(p + int2(-1, 0)), 0));
+    float fR = FoamSrc.Load(int3(ClampC(p + int2( 1, 0)), 0));
+    float fD = FoamSrc.Load(int3(ClampC(p + int2( 0,-1)), 0));
+    float fU = FoamSrc.Load(int3(ClampC(p + int2( 0, 1)), 0));
+    float foam = lerp(fC, (fL + fR + fD + fU) * 0.25, _FoamSpread);
+
+    // generation from turbulence: speed + negative curvature (crests / chop)
+    float speed = abs(info.g);
+    float lap = (Read(p + int2(-1,0)).r + Read(p + int2(1,0)).r +
+                 Read(p + int2(0,-1)).r + Read(p + int2(0,1)).r) * 0.25 - info.r;
+    float gen = saturate(speed * _FoamFromSpeed + max(0.0, -lap) * _FoamFromCurv);
+    foam += gen * _FoamGenRate;
+
+    foam *= _FoamDecay;
+    FoamDst[p] = saturate(foam);
 }
 
 // Subtract the mean height so the closed pool conserves volume (stops the whole

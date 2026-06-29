@@ -10,14 +10,18 @@ namespace WebGLWater
         public const int Resolution = 256;
 
         readonly ComputeShader _cs;
-        readonly int _kDrop, _kUpdate, _kNormal, _kObstacle, _kConserve;
+        readonly int _kDrop, _kUpdate, _kNormal, _kObstacle, _kFoam, _kConserve;
         readonly int _groups;
 
         RenderTexture _a; // current state (height, velocity, normal.x, normal.z)
         RenderTexture _b; // scratch
+        RenderTexture _foamA, _foamB; // foam amount ping-pong (R)
 
         /// <summary>The texture holding the current simulation state.</summary>
         public RenderTexture Texture => _a;
+
+        /// <summary>The current foam amount texture (R channel).</summary>
+        public RenderTexture FoamTexture => _foamA;
 
         public WaterSimulation(ComputeShader cs)
         {
@@ -26,25 +30,27 @@ namespace WebGLWater
             _kUpdate = cs.FindKernel("Update");
             _kNormal = cs.FindKernel("Normal");
             _kObstacle = cs.FindKernel("Obstacle");
+            _kFoam = cs.FindKernel("Foam");
             _kConserve = cs.FindKernel("Conserve");
             _groups = Resolution / 8;
 
-            _a = Create();
-            _b = Create();
-            Clear(_a);
-            Clear(_b);
+            _a = Create(RenderTextureFormat.ARGBFloat, "WaterSimState");
+            _b = Create(RenderTextureFormat.ARGBFloat, "WaterSimState");
+            _foamA = Create(RenderTextureFormat.RFloat, "WaterFoam");
+            _foamB = Create(RenderTextureFormat.RFloat, "WaterFoam");
+            Clear(_a); Clear(_b); Clear(_foamA); Clear(_foamB);
         }
 
-        static RenderTexture Create()
+        static RenderTexture Create(RenderTextureFormat format, string name)
         {
-            var rt = new RenderTexture(Resolution, Resolution, 0, RenderTextureFormat.ARGBFloat)
+            var rt = new RenderTexture(Resolution, Resolution, 0, format)
             {
                 enableRandomWrite = true,
                 filterMode = FilterMode.Bilinear,
                 wrapMode = TextureWrapMode.Clamp,
                 useMipMap = false,
                 autoGenerateMips = false,
-                name = "WaterSimState"
+                name = name
             };
             rt.Create();
             return rt;
@@ -62,6 +68,8 @@ namespace WebGLWater
         {
             if (_a != null) _a.Release();
             if (_b != null) _b.Release();
+            if (_foamA != null) _foamA.Release();
+            if (_foamB != null) _foamB.Release();
         }
 
         void Dispatch(int kernel)
@@ -101,6 +109,24 @@ namespace WebGLWater
         }
 
         public void UpdateNormals() => Dispatch(_kNormal);
+
+        /// <summary>Advance the foam buffer: spread, generate from turbulence, decay.
+        /// Reads the current height state; ping-pongs the foam textures.</summary>
+        public void StepFoam(float genRate, float decay, float spread, float fromSpeed, float fromCurv)
+        {
+            _cs.SetFloat("_Size", Resolution);
+            _cs.SetVector("_Delta", new Vector4(1f / Resolution, 1f / Resolution, 0, 0));
+            _cs.SetFloat("_FoamGenRate", genRate);
+            _cs.SetFloat("_FoamDecay", decay);
+            _cs.SetFloat("_FoamSpread", spread);
+            _cs.SetFloat("_FoamFromSpeed", fromSpeed);
+            _cs.SetFloat("_FoamFromCurv", fromCurv);
+            _cs.SetTexture(_kFoam, "Src", _a);        // height state (read)
+            _cs.SetTexture(_kFoam, "FoamSrc", _foamA);
+            _cs.SetTexture(_kFoam, "FoamDst", _foamB);
+            _cs.Dispatch(_kFoam, _groups, _groups, 1);
+            (_foamA, _foamB) = (_foamB, _foamA);
+        }
 
         /// <summary>Subtracts the mean height (from heightMip's top mip) to conserve volume.</summary>
         public void ConserveVolume(RenderTexture heightMip)
