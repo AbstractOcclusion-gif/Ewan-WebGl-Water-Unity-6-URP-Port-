@@ -85,6 +85,7 @@ namespace WebGLWater
         static readonly int ID_Tiles = Shader.PropertyToID("_Tiles");
         static readonly int ID_Sky = Shader.PropertyToID("_Sky");
         static readonly int ID_Light = Shader.PropertyToID("_LightDir");
+        static readonly int ID_SunColor = Shader.PropertyToID("_SunColor");
 
         void OnEnable()
         {
@@ -129,6 +130,7 @@ namespace WebGLWater
 
             if (sun != null) lightDir = -sun.transform.forward; // light travels along sun.forward
             Shader.SetGlobalVector(ID_Light, lightDir.normalized);
+            Shader.SetGlobalColor(ID_SunColor, sun != null ? sun.color * sun.intensity : Color.white);
             if (tiles != null) Shader.SetGlobalTexture(ID_Tiles, tiles);
             if (sky != null) Shader.SetGlobalTexture(ID_Sky, sky);
         }
@@ -154,6 +156,7 @@ namespace WebGLWater
             if (sun != null) lightDir = -sun.transform.forward;
             Shader.SetGlobalTexture(ID_Water, _water.Texture);
             Shader.SetGlobalVector(ID_Light, lightDir.normalized);
+            Shader.SetGlobalColor(ID_SunColor, sun != null ? sun.color * sun.intensity : Color.white);
 
             UpdateCaustics();
             RequestHeightReadback();

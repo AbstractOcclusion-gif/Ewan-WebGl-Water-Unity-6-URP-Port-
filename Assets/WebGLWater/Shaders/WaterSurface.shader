@@ -51,6 +51,7 @@ Shader "WebGLWater/WaterSurface"
 
             float _Underwater;
             float _ReflectionStrength;
+            float3 _SunColor; // Unity directional light color * intensity (global)
 
             sampler2D _PlanarReflectionTex;
             float     _ReflectionDistortion;
@@ -140,7 +141,8 @@ Shader "WebGLWater/WaterSurface"
                     else
                     {
                         color = texCUBE(_Sky, ray).rgb;
-                        color += float3(10.0, 8.0, 6.0) * pow(max(0.0, dot(_LightDir, ray)), 5000.0);
+                        // sun glint - direction from _LightDir, tint/brightness from the Unity sun
+                        color += float3(10.0, 8.0, 6.0) * _SunColor * pow(max(0.0, dot(_LightDir, ray)), 5000.0);
                     }
                 }
                 if (ray.y < 0.0) color *= waterColor;

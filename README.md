@@ -1,12 +1,14 @@
-# WebGL Water — Unity 6 / URP Port
+# WebGL Water — Unity 6 / URP Adaptation & Enhancement
 
-> **Original work by [Evan Wallace](https://madebyevan.com/webgl-water/).**
-> This repository is a faithful **port** of his 2011 *WebGL Water* demo to
-> Unity 6 + URP. All of the original ideas — the GPU heightfield simulation,
-> the in-shader ray-traced reflection/refraction, the projected caustics and
-> the blob/rim shadows — are his. Full credit and copyright for the original
-> design and shaders belong to Evan Wallace; this port simply re-implements
-> them in Unity. See the original: https://madebyevan.com/webgl-water/ and
+> **Based on the original [WebGL Water](https://madebyevan.com/webgl-water/) by
+> [Evan Wallace](https://madebyevan.com/) (2011, MIT).** The GPU heightfield
+> simulation, the in-shader ray-traced reflection/refraction and the projected
+> caustics are his ideas, and full credit for that original design belongs to him.
+>
+> This project *began* as a faithful Unity 6 + URP **port** of that demo, but has
+> since grown into a full Unity **adaptation and enhancement** — re-architected
+> around real Unity rendering and physics and extended well beyond the original
+> feature set. See the original: https://madebyevan.com/webgl-water/ and
 > https://github.com/evanw/webgl-water
 
 ---
@@ -17,24 +19,55 @@
 runs in the browser via Unity 6 **WebGPU** (needs a WebGPU-capable browser:
 Chrome / Edge, Safari 26+, or the latest Firefox).
 
-An interactive pool of water you can poke, ripple, and drop a ball into, with
-real-time caustics on the floor — running entirely on the GPU inside Unity.
+An interactive pool of water you can poke and ripple, drop real objects into, and
+watch them float — with real-time caustics, reflections and shadows, running on
+the GPU inside Unity.
+
+## A full Unity adaptation — not just a port
+
+The goal was not to stop at a 1:1 translation of the 2011 demo, but to make it a
+*native* Unity citizen and push it further. The original's clever analytic
+shortcuts — a single hard-coded ball, faked reflection/refraction of an analytic
+pool, a painted-on blob shadow, a hand-typed light vector — have been replaced
+with real Unity rendering and physics. The water now lives in an actual scene with
+arbitrary objects, real lights and real shadows.
+
+### Enhancements over the original
+
+- **Hybrid real-time reflections** — screen-space reflections (SSR) blended with a
+  planar mirror reflection of the live scene, falling back to the sky cubemap; both
+  toggleable per material.
+- **True transparency** — optional screen-space refraction samples the real scene
+  *behind* the surface instead of a faked analytic pool, so anything in the water
+  is genuinely visible through it.
+- **Two-way object interaction** — the scripted ball is gone. Any object marked
+  `WaterInteractable` displaces the surface through a GPU obstacle map (generalising
+  the original sphere kernel to arbitrary meshes), and `WaterBuoyancy` reads the
+  height field back via `AsyncGPUReadback` so objects float and bob — full two-way
+  coupling.
+- **Real Unity lighting** — the hand-typed light vector is gone; one Unity
+  **directional light** now drives the water surface, the caustics projection and
+  real shadows together. Move the sun and everything tracks it.
+- **Real shadows & caustics on geometry** — objects cast and receive URP shadows,
+  the pool receives them too, and submerged objects catch the projected caustics on
+  their own surfaces.
 
 ## Features
 
 - **GPU heightfield simulation** — 256×256 ping-pong float texture driven by a
-  compute shader (drop / wave-propagation / normal / sphere-displacement kernels).
-- **In-shader ray tracing** — the water surface analytically reflects and
-  refracts the pool, the ball, and a sky cubemap, exactly like the original.
-- **Projected caustics** — the water grid is projected onto the floor to compute
-  light focusing.
-- **Blob & rim shadows** — the ball casts a soft shadow; the pool rim self-shadows.
+  compute shader (drop / wave-propagation / normal / obstacle-displacement kernels).
+- **Hybrid reflections** — analytic sky → planar → SSR, blended and toggleable.
+- **Real transparency** — optional screen-space refraction of the live scene.
+- **Two-way object interaction** — GPU obstacle displacement + async-readback buoyancy.
+- **Projected caustics** — on the pool floor/walls *and* on submerged objects.
+- **Real lighting & shadows** — a Unity directional light drives water, caustics and
+  URP shadows; objects cast/receive, the pool receives.
 - **Volume conservation** — the surface stays level no matter how hard you ripple it.
 - **Reusable orbit camera** — drag to orbit, scroll to zoom.
 - **Designer knobs** — wave speed, damping, sub-steps, ripple strength/radius,
-  and reflection strength, all exposed in the inspector.
-- **Self-contained** — a one-click editor menu builds the whole scene, including
-  a procedural sky cubemap and a fallback tile texture.
+  reflection strength, obstacle strength and buoyancy, all exposed in the inspector.
+- **Self-contained** — a one-click editor menu builds the whole scene, including a
+  procedural sky cubemap, a directional light, and a demo floating crate.
 
 ## Requirements
 
@@ -61,12 +94,13 @@ camera and the `Water Controller`.
 | Action | Result |
 | --- | --- |
 | Drag on the water | Make ripples |
-| Drag the ball | Move it and displace water |
 | Drag the background | Orbit the camera |
 | Scroll wheel | Zoom |
 | **Space** | Pause / resume the simulation |
-| **G** | Toggle ball gravity / physics |
-| **L** (hold) | Point the light along the camera view |
+| **L** (hold) | Point the sun along the camera view |
+
+> Drop real objects in by giving them a `Rigidbody`, a `Collider`,
+> `WaterInteractable` and `WaterBuoyancy` — they'll displace the surface and float.
 
 ## Tuning (Water Controller inspector)
 
@@ -78,6 +112,12 @@ camera and the `Water Controller`.
 | **Ripple Strength / Radius** | Size and intensity of a click/drag ripple. |
 | **Conserve Volume** | Keeps the surface from drifting up/down as ripples are added. |
 | **Reflection Strength** (0–1) | On the water materials. 1 = original Fresnel; 0 = fully see-through. |
+| **Obstacle Strength** | How hard submerged objects push the surface down. |
+| **Buoyancy** (on `WaterBuoyancy`) | Float strength; higher rides higher. |
+
+> Reflection / transparency toggles live on the **water materials**: *Use Planar
+> Reflection*, *Use Screen Space Reflection* and *Real (Screen-Space) Refraction*.
+> SSR and refraction need **Depth Texture** + **Opaque Texture** enabled on the URP asset.
 
 > Presets — *calm pond:* waveSpeed ~1.0, damping ~0.99, steps 2.
 > *energetic:* waveSpeed 2.0, damping 0.997, steps 3–4, higher ripple strength.
@@ -91,13 +131,16 @@ dimensions and assign your tile texture to **Water Controller ▸ Tiles**.
 
 ## How it maps to the original
 
-| Original (`evanw/webgl-water`) | This port |
+| Original (`evanw/webgl-water`) | This adaptation |
 | --- | --- |
-| `water.js` | `WaterSim.compute` + `WaterSimulation.cs` |
+| `water.js` | `WaterSim.compute` (+ generalised obstacle kernel) + `WaterSimulation.cs` |
 | `renderer.js` helper functions | `WaterCommon.hlsl` |
-| water / cube / sphere shaders | `WaterSurface` / `PoolWall` / `WaterSphere` shaders |
+| water / cube shaders | `WaterSurface` (hybrid reflection + real refraction) / `PoolWall` (URP, shadow-receiving) |
+| sphere shader + ball physics | **removed** — replaced by `WaterInteractable` + `WaterObstacle` + `WaterBuoyancy` for arbitrary objects |
 | `updateCaustics` | `Caustics.shader` drawn into a 1024² RT via a CommandBuffer |
 | `main.js` (input, camera, physics) | `WaterController.cs` + `OrbitCamera.cs` |
+| _(new)_ planar reflection | `PlanarReflection.cs` |
+| _(new)_ lit objects + caustics + shadows | `WaterReceiver.shader` driven by a real Unity directional light |
 
 There's a more detailed developer guide in
 [`Assets/WebGLWater/README.md`](Assets/WebGLWater/README.md), including the few
@@ -106,26 +149,30 @@ in-editor tweaks you may need (face-culling direction, caustic Y-flip, color spa
 ## Known limitations
 
 It's a **contained, heightfield** water — great for pools, ponds and fountains,
-not oceans. It simulates vertical displacement only (no breaking waves/splashes),
-covers a single bounded body of water, and its reflections see only the cubemap +
-analytic pool + the one ball (not arbitrary scene geometry). The simulation lives
-on the GPU, so gameplay interaction (buoyancy, floating objects) needs an
-`AsyncGPUReadback` of the height texture. See the developer guide for the full list.
+not oceans. It simulates vertical displacement only (no breaking waves yet — foam
+and splashes are on the roadmap), and covers a single bounded body of water.
+Reflections now see real scene geometry via SSR/planar, and arbitrary objects
+interact two-way, but buoyancy relies on `AsyncGPUReadback` of the height texture,
+which is not guaranteed on every backend (notably WebGPU is still experimental) —
+where it's unavailable, objects sink rather than float. See the developer guide for
+the full list.
 
 ## Credits & License
 
 - **Original concept, design and GLSL shaders:** © 2011 **Evan Wallace** —
   https://madebyevan.com/webgl-water/ — released under the **MIT License**.
-- **Unity 6 / URP port:** this repository, also released under the **MIT License**.
+- **Unity 6 / URP adaptation and enhancements:** this repository, also released
+  under the **MIT License**.
 
-This port is provided in the same spirit as the original. If you use it, please
-keep the credit to Evan Wallace for the original work.
+This adaptation is provided in the same spirit as the original. The foundational
+design is Evan Wallace's; if you use it, please keep the credit to him for the
+original work.
 
 ```
 MIT License
 
 Copyright (c) 2011 Evan Wallace (original WebGL Water)
-Copyright (c) 2026 (Unity 6 / URP port)
+Copyright (c) 2026 (Unity 6 / URP adaptation and enhancements)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
