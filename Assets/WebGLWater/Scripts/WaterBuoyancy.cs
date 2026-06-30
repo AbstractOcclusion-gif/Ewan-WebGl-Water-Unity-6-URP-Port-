@@ -118,32 +118,34 @@ namespace WebGLWater
         {
             if (_ctrl == null || _localPoints == null || _localPoints.Length == 0) return;
 
-            Vector3 up = -Physics.gravity.normalized;
             float g = Physics.gravity.magnitude;
             float invCount = 1f / _localPoints.Length;
             float submergedSum = 0f;
+            Vector3 up = -Physics.gravity.normalized; // replaced by the volume's up while submerged
 
             foreach (Vector3 local in _localPoints)
             {
                 Vector3 world = transform.TransformPoint(local);
-                if (!_ctrl.TryGetSurface(world.x, world.z, out float surfaceY, out Vector2 flow)) continue;
+                // Evaluated in the volume's frame, so this is correct under rotation,
+                // tilt and a non-uniform (rectangular / custom-depth) volume.
+                if (!_ctrl.TrySampleSubmersion(world, out float depth, out Vector3 volumeUp, out Vector3 flow)) continue;
+                up = volumeUp;
 
-                float fraction = SphereSubmergedFraction(surfaceY - world.y, _sphereRadius);
+                float fraction = SphereSubmergedFraction(depth, _sphereRadius);
                 if (fraction <= 0f) continue;
                 submergedSum += fraction;
 
                 float weight = fraction * invCount;
 
-                // Archimedes lift at the point -> net force + righting torque.
+                // Archimedes lift along the volume up -> net force + righting torque.
                 _rb.AddForceAtPosition(up * (g * buoyancy * weight), world, ForceMode.Acceleration);
 
                 // Per-point drag so the object settles (damps translation and rotation).
                 Vector3 pointVel = _rb.GetPointVelocity(world);
                 _rb.AddForceAtPosition(-pointVel * (waterLinearDamping * weight), world, ForceMode.Acceleration);
 
-                // Push along the local surface flow so waves carry and lean the object.
-                Vector3 drift = new Vector3(flow.x, 0f, flow.y);
-                _rb.AddForceAtPosition(drift * (waveDriftStrength * weight), world, ForceMode.Acceleration);
+                // Push along the surface flow so waves carry and lean the object.
+                _rb.AddForceAtPosition(flow * (waveDriftStrength * weight), world, ForceMode.Acceleration);
             }
 
             if (submergedSum <= 0f) return;

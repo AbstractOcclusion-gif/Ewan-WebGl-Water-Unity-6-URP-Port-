@@ -29,6 +29,18 @@ namespace WebGLWater
         public Texture tiles;             // pool tile albedo sampled by the water reflection (assign your own)
         public Cubemap sky;               // sky cubemap for above-water reflections
 
+        [Header("Water volume (placement)")]
+        [Tooltip("World position of the pool origin (centre of the surface).")]
+        public Vector3 volumeCenter = Vector3.zero;
+        [Tooltip("World half-size per pool unit, per axis: X = half width, Y = depth to the " +
+                 "floor, Z = half length. (1,1,1) is the original 1:1 pool. X != Z gives a " +
+                 "rectangular footprint; Y alone makes it shallow/deep.")]
+        public Vector3 volumeExtent = Vector3.one;
+        [Tooltip("Rotation of the whole volume (Euler degrees). Y rotates the footprint; " +
+                 "X/Z tilt the body (tilt is visual - object floating assumes near-level water). " +
+                 "Set extent/rotation before Play; the obstacle map is built from them at startup.")]
+        public Vector3 volumeEuler = Vector3.zero;
+
         [Header("Simulation")]
         [Tooltip("Direction TOWARD the light. Auto-driven from 'sun' when one is assigned.")]
         public Vector3 lightDir = new Vector3(2f, 2f, -1f);
@@ -49,6 +61,28 @@ namespace WebGLWater
         [Tooltip("Per-channel extinction; red highest so it absorbs first.")]
         public Color fogExtinction = new Color(0.45f, 0.15f, 0.08f);
         [Range(0f, 8f)] public float fogDensity = 2f;
+
+        [Header("Wind waves (spectral)")]
+        [Tooltip("Ambient wind-driven wave layer composited on top of the interactive ripples. " +
+                 "Floating objects ride these waves too.")]
+        public bool windWaves = true;
+        [Tooltip("Wind speed (m/s). ~3 = light breeze.")]
+        [Range(0f, 15f)] public float windSpeed = 3f;
+        [Tooltip("Wind heading in degrees: 0 = blowing toward +X (i.e. coming from the west).")]
+        [Range(0f, 360f)] public float windFromDegrees = 0f;
+        [Tooltip("Physical size the pool half-extent ([-1,1] -> +/-this) represents, in metres. " +
+                 "Sets wave scale; fetch is twice this.")]
+        [Range(1f, 50f)] public float poolHalfExtentMeters = 10f;
+        [Tooltip("Number of sinusoidal components summed for the wave layer.")]
+        [Range(1, WaterWaveBank.MaxWaves)] public int waveCount = 12;
+        [Tooltip("Artistic multiplier on the physically-derived wave height (a light breeze " +
+                 "on a small lake is physically sub-cm, so some exaggeration reads better).")]
+        [Range(0f, 12f)] public float waveAmplitudeScale = 4f;
+        [Tooltip("Higher = waves cling more tightly to the wind direction (parallel, river-like). " +
+                 "Lower = broader, choppier crossing crests.")]
+        [Range(1f, 12f)] public float waveDirectionSpread = 2f;
+        [Tooltip("Scales how strongly the wind waves tilt the surface normal.")]
+        [Range(0f, 3f)] public float waveNormalStrength = 1f;
 
         [Header("Foam")]
         public bool foam = false;
@@ -77,9 +111,9 @@ namespace WebGLWater
         [Range(0.90f, 1.0f)] public float damping = 0.995f;
         [Tooltip("Simulation sub-steps per frame. More = faster, smoother propagation.")]
         [Range(1, 8)] public int stepsPerFrame = 2;
-        [Tooltip("Height added by a click/drag ripple (deformation intensity).")]
+        [Tooltip("Height added by a click/drag ripple (world units; volume-scale independent).")]
         [Range(0.001f, 0.08f)] public float rippleStrength = 0.01f;
-        [Tooltip("Radius of a click/drag ripple in pool space.")]
+        [Tooltip("Radius of a click/drag ripple (world units; volume-scale independent).")]
         [Range(0.005f, 0.2f)] public float rippleRadius = 0.03f;
         [Tooltip("Seed the pool with random ripples on start.")]
         public bool seedRipplesOnStart = true;
@@ -96,6 +130,13 @@ namespace WebGLWater
         // runtime
         WaterSimulation _water;
         WaterObstacle _obstacle;
+
+        // wind-wave layer (shared by the surface shader and CPU buoyancy)
+        readonly WaterWaveBank _waveBank = new WaterWaveBank();
+        float _waveTime;
+        Vector4 _waveGenSignature = new Vector4(float.NaN, 0f, 0f, 0f);
+        float _waveGenSpread = float.NaN;
+        bool _waveGenEnabled;
 
         // CPU copy of the height field for buoyancy queries
         Color[] _heightCpu;
@@ -140,6 +181,15 @@ namespace WebGLWater
         static readonly int ID_FoamStrength = Shader.PropertyToID("_FoamStrength");
         static readonly int ID_FoamBorder = Shader.PropertyToID("_FoamBorderWidth");
         static readonly int ID_FoamContact = Shader.PropertyToID("_FoamContactDepth");
+        static readonly int ID_WaveA = Shader.PropertyToID("_WaveA");
+        static readonly int ID_WaveB = Shader.PropertyToID("_WaveB");
+        static readonly int ID_WaveCount = Shader.PropertyToID("_WaveCount");
+        static readonly int ID_WaveTime = Shader.PropertyToID("_WaveTime");
+        static readonly int ID_WaveMeters = Shader.PropertyToID("_WaveMetersPerUnit");
+        static readonly int ID_WaveNormal = Shader.PropertyToID("_WaveNormalStrength");
+        static readonly int ID_VolumeCenter = Shader.PropertyToID("_VolumeCenter");
+        static readonly int ID_VolumeExtent = Shader.PropertyToID("_VolumeExtent");
+        static readonly int ID_VolumeRot = Shader.PropertyToID("_VolumeRot");
 
         void OnEnable()
         {
@@ -148,7 +198,8 @@ namespace WebGLWater
             _water = new WaterSimulation(simCompute);
 
             if (obstacleShader != null)
-                _obstacle = new WaterObstacle(obstacleShader, WaterSimulation.Resolution, 0f);
+                _obstacle = new WaterObstacle(obstacleShader, WaterSimulation.Resolution,
+                                              volumeCenter, VolumeRotation, VolumeExtentSafe);
 
             _causticMat = new Material(causticsShader);
             _causticRT = new RenderTexture(causticResolution, causticResolution, 0, RenderTextureFormat.ARGB32)
@@ -186,6 +237,9 @@ namespace WebGLWater
             Shader.SetGlobalVector(ID_Light, lightDir.normalized);
             Shader.SetGlobalColor(ID_SunColor, sun != null ? sun.color * sun.intensity : Color.white);
             PublishFog();
+            PublishVolume();
+            EnsureWaveBank();
+            PublishWaves();
             if (tiles != null) Shader.SetGlobalTexture(ID_Tiles, tiles);
             if (sky != null) Shader.SetGlobalTexture(ID_Sky, sky);
         }
@@ -205,7 +259,7 @@ namespace WebGLWater
             HandleMouse();
 
             float dt = Time.deltaTime;
-            if (!_paused) Step(dt);
+            if (!_paused) { Step(dt); _waveTime += dt; }
 
             // publish globals for the surface / pool shaders
             if (sun != null) lightDir = -sun.transform.forward;
@@ -214,6 +268,9 @@ namespace WebGLWater
             Shader.SetGlobalColor(ID_SunColor, sun != null ? sun.color * sun.intensity : Color.white);
             PublishFog();
             PublishFoam();
+            PublishVolume();
+            EnsureWaveBank();
+            PublishWaves();
 
             UpdateCaustics();
             RequestHeightReadback();
@@ -239,45 +296,97 @@ namespace WebGLWater
             _heightReady = true;
         }
 
-        /// <summary>Inject a ripple at pool position (x,z in [-1,1]); used by splashes.</summary>
-        public void AddRipple(float x, float z, float radius, float strength)
+        /// <summary>Inject a ripple at a WORLD position (x,z). Converted into the pool
+        /// footprint via the volume frame; out-of-footprint calls are ignored. Radius is
+        /// in world units (kept round via the average horizontal extent).</summary>
+        public void AddRipple(float worldX, float worldZ, float radius, float strength)
         {
-            _water?.AddDrop(x, z, radius, strength);
+            Vector3 probe = new Vector3(worldX, volumeCenter.y, worldZ);
+            if (!WorldToPoolXZ(probe, out float px, out float pz)) return;
+            _water?.AddDrop(px, pz, radius / VolumeHorizontalExtent, strength / VolumeExtentSafe.y);
         }
 
-        /// <summary>World-space height (Y) of the water surface at pool position
-        /// (x,z in [-1,1]). Returns false until the first readback has landed or if
-        /// the point is outside the pool.</summary>
-        public bool TryGetWaterHeight(float x, float z, out float height)
+        /// <summary>World-space height (Y) of the water surface above WORLD (x,z).
+        /// Returns false until the first readback lands or if outside the footprint.</summary>
+        public bool TryGetWaterHeight(float worldX, float worldZ, out float height)
         {
             height = 0f;
             if (!_heightReady || _heightCpu == null) return false;
-            float u = x * 0.5f + 0.5f, v = z * 0.5f + 0.5f;
-            if (u < 0f || u > 1f || v < 0f || v > 1f) return false;
-            int px = Mathf.Clamp((int)(u * SimRes), 0, SimRes - 1);
-            int pz = Mathf.Clamp((int)(v * SimRes), 0, SimRes - 1);
-            height = _heightCpu[pz * SimRes + px].r; // surface sits at y = 0 + displacement
+            Vector3 probe = new Vector3(worldX, volumeCenter.y, worldZ);
+            if (!WorldToPoolXZ(probe, out float px, out float pz)) return false;
+
+            float poolHeight = SamplePoolHeight(px, pz);
+            height = PoolToWorld(new Vector3(px, poolHeight, pz)).y; // pool -> world Y
             return true;
         }
 
-        /// <summary>World-space surface height plus the horizontal surface-flow
-        /// direction at pool position (x,z in [-1,1]). Flow is the stored normal.xz,
-        /// which equals -gradient(height) (i.e. the downhill direction the surface
-        /// pushes floating things). Returns false until the first readback lands or if
-        /// the point is outside the pool.</summary>
-        public bool TryGetSurface(float x, float z, out float height, out Vector2 flow)
+        /// <summary>World surface height (Y) plus the horizontal surface-flow (world x,z)
+        /// above WORLD (x,z). For surface effects that ride the waterline (splash drift).
+        /// Approximate under steep tilt; exact for rotation/rectangular/depth.</summary>
+        public bool TryGetSurface(float worldX, float worldZ, out float height, out Vector2 flow)
         {
             height = 0f;
             flow = Vector2.zero;
             if (!_heightReady || _heightCpu == null) return false;
-            float u = x * 0.5f + 0.5f, v = z * 0.5f + 0.5f;
-            if (u < 0f || u > 1f || v < 0f || v > 1f) return false;
+            Vector3 probe = new Vector3(worldX, volumeCenter.y, worldZ);
+            if (!WorldToPoolXZ(probe, out float px, out float pz)) return false;
+
+            Color sample = SamplePoolTexel(px, pz);
+            float poolHeight = sample.r;
+            Vector2 poolFlow = new Vector2(sample.b, sample.a); // (normal.x, normal.z)
+            if (windWaves)
+            {
+                poolHeight += _waveBank.SampleHeight(px, pz, _waveTime, WaveMetersPerUnit);
+                poolFlow -= _waveBank.SampleSlope(px, pz, _waveTime, WaveMetersPerUnit) * waveNormalStrength;
+            }
+            height = PoolToWorld(new Vector3(px, poolHeight, pz)).y;
+            Vector3 worldFlow = VolumeRotation * new Vector3(poolFlow.x, 0f, poolFlow.y);
+            flow = new Vector2(worldFlow.x, worldFlow.z);
+            return true;
+        }
+
+        /// <summary>Sample submersion for a buoyancy point at an arbitrary WORLD point.
+        /// Works under rotation/tilt/non-uniform extent because it is evaluated in pool
+        /// space. Returns the world-space depth below the surface (negative = above),
+        /// the volume's up direction, and the world-space surface-flow push.</summary>
+        public bool TrySampleSubmersion(Vector3 worldPoint, out float depthWorld, out Vector3 up, out Vector3 worldFlow)
+        {
+            depthWorld = 0f;
+            up = VolumeUp;
+            worldFlow = Vector3.zero;
+            if (!_heightReady || _heightCpu == null) return false;
+
+            Vector3 pool = WorldToPool(worldPoint);
+            if (pool.x < -1f || pool.x > 1f || pool.z < -1f || pool.z > 1f) return false;
+
+            Color sample = SamplePoolTexel(pool.x, pool.z);
+            float surfaceH = sample.r;
+            Vector2 poolFlow = new Vector2(sample.b, sample.a); // (normal.x, normal.z)
+            if (windWaves)
+            {
+                surfaceH += _waveBank.SampleHeight(pool.x, pool.z, _waveTime, WaveMetersPerUnit);
+                poolFlow -= _waveBank.SampleSlope(pool.x, pool.z, _waveTime, WaveMetersPerUnit) * waveNormalStrength;
+            }
+
+            depthWorld = (surfaceH - pool.y) * VolumeExtentSafe.y; // pool depth -> world depth along up
+            worldFlow = VolumeRotation * new Vector3(poolFlow.x, 0f, poolFlow.y);
+            return true;
+        }
+
+        // Pool-space height (sim ripple + wind waves) at pool xz in [-1,1].
+        float SamplePoolHeight(float poolX, float poolZ)
+        {
+            float h = SamplePoolTexel(poolX, poolZ).r;
+            if (windWaves) h += _waveBank.SampleHeight(poolX, poolZ, _waveTime, WaveMetersPerUnit);
+            return h;
+        }
+
+        Color SamplePoolTexel(float poolX, float poolZ)
+        {
+            float u = poolX * 0.5f + 0.5f, v = poolZ * 0.5f + 0.5f;
             int px = Mathf.Clamp((int)(u * SimRes), 0, SimRes - 1);
             int pz = Mathf.Clamp((int)(v * SimRes), 0, SimRes - 1);
-            Color sample = _heightCpu[pz * SimRes + px];
-            height = sample.r;
-            flow = new Vector2(sample.b, sample.a); // (normal.x, normal.z)
-            return true;
+            return _heightCpu[pz * SimRes + px];
         }
 
         void Step(float seconds)
@@ -287,7 +396,7 @@ namespace WebGLWater
             // Push the surface with the live submerged footprint of interactable objects.
             if (_obstacle != null)
             {
-                _obstacle.Render(0f);
+                _obstacle.Render(volumeCenter.y);
                 _water.ApplyObstacle(_obstacle.Prev, _obstacle.Curr, obstacleStrength, obstacleFlipY);
             }
 
@@ -316,6 +425,89 @@ namespace WebGLWater
             _cb.DrawMesh(waterMesh, Matrix4x4.identity, _causticMat, 0, 0);
             Graphics.ExecuteCommandBuffer(_cb);
             Shader.SetGlobalTexture(ID_Caustic, _causticRT);
+        }
+
+        // ---- volume placement frame (center + rotation + non-uniform extent) ----
+        Vector3 VolumeExtentSafe => new Vector3(
+            Mathf.Max(volumeExtent.x, 1e-5f),
+            Mathf.Max(volumeExtent.y, 1e-5f),
+            Mathf.Max(volumeExtent.z, 1e-5f));
+        Quaternion VolumeRotation => Quaternion.Euler(volumeEuler);
+        Vector3 VolumeUp => VolumeRotation * Vector3.up;
+        // Average horizontal extent, used to keep a click ripple round in world units.
+        float VolumeHorizontalExtent => 0.5f * (VolumeExtentSafe.x + VolumeExtentSafe.z);
+
+        Vector3 PoolToWorld(Vector3 pool) => volumeCenter + VolumeRotation * Vector3.Scale(pool, VolumeExtentSafe);
+
+        Vector3 WorldToPool(Vector3 world)
+        {
+            Vector3 e = VolumeExtentSafe;
+            Vector3 local = Quaternion.Inverse(VolumeRotation) * (world - volumeCenter);
+            return new Vector3(local.x / e.x, local.y / e.y, local.z / e.z);
+        }
+
+        void PublishVolume()
+        {
+            Shader.SetGlobalVector(ID_VolumeCenter, volumeCenter);
+            Shader.SetGlobalVector(ID_VolumeExtent, VolumeExtentSafe);
+            Shader.SetGlobalMatrix(ID_VolumeRot, Matrix4x4.Rotate(VolumeRotation));
+        }
+
+        // World point -> pool. Returns false if outside the [-1,1] horizontal footprint.
+        bool WorldToPoolXZ(Vector3 world, out float poolX, out float poolZ)
+        {
+            Vector3 p = WorldToPool(world);
+            poolX = p.x; poolZ = p.z;
+            return poolX >= -1f && poolX <= 1f && poolZ >= -1f && poolZ <= 1f;
+        }
+
+        // Intersect a camera ray with the (possibly tilted) surface plane through the
+        // volume centre. Returns the world hit and its pool x,z (which may fall outside
+        // [-1,1]); false only if the ray is parallel to or points away from the plane.
+        bool TryPickSurface(Vector3 eye, Vector3 dir, out Vector3 worldHit, out float poolX, out float poolZ)
+        {
+            worldHit = Vector3.zero; poolX = 0f; poolZ = 0f;
+            Vector3 n = VolumeUp;
+            float denom = Vector3.Dot(dir, n);
+            if (Mathf.Abs(denom) < 1e-6f) return false;
+            float t = Vector3.Dot(volumeCenter - eye, n) / denom;
+            if (t < 0f) return false;
+            worldHit = eye + dir * t;
+            Vector3 pool = WorldToPool(worldHit);
+            poolX = pool.x; poolZ = pool.z;
+            return true;
+        }
+
+        // ---- wind-wave layer -----------------------------------------------
+        float WaveMetersPerUnit => Mathf.Max(1e-3f, poolHalfExtentMeters);
+
+        // Regenerate the bank only when a wind/scale parameter actually changes, so
+        // the phases stay stable frame-to-frame (a fresh bank would pop the surface).
+        void EnsureWaveBank()
+        {
+            var signature = new Vector4(windSpeed, windFromDegrees, poolHalfExtentMeters,
+                                        waveCount + 100f * waveAmplitudeScale);
+            bool dirty = windWaves != _waveGenEnabled
+                         || signature != _waveGenSignature
+                         || waveDirectionSpread != _waveGenSpread;
+            if (!dirty) return;
+
+            _waveBank.Generate(windSpeed, windFromDegrees, 2f * poolHalfExtentMeters,
+                               waveCount, waveAmplitudeScale, waveDirectionSpread, WaveMetersPerUnit);
+            _waveGenSignature = signature;
+            _waveGenSpread = waveDirectionSpread;
+            _waveGenEnabled = windWaves;
+        }
+
+        void PublishWaves()
+        {
+            int count = windWaves ? _waveBank.Count : 0;
+            Shader.SetGlobalVectorArray(ID_WaveA, _waveBank.PackedA);
+            Shader.SetGlobalVectorArray(ID_WaveB, _waveBank.PackedB);
+            Shader.SetGlobalInt(ID_WaveCount, count);
+            Shader.SetGlobalFloat(ID_WaveTime, _waveTime);
+            Shader.SetGlobalFloat(ID_WaveMeters, WaveMetersPerUnit);
+            Shader.SetGlobalFloat(ID_WaveNormal, waveNormalStrength);
         }
 
         void PublishFog()
@@ -358,12 +550,11 @@ namespace WebGLWater
                 Vector3 eye = ray.origin;
                 Vector3 d = ray.direction;
 
-                Vector3 pointOnPlane = eye + d * (-eye.y / d.y); // intersect y = 0
-
-                if (Mathf.Abs(pointOnPlane.x) < 1f && Mathf.Abs(pointOnPlane.z) < 1f)
+                bool onPlane = TryPickSurface(eye, d, out _, out float px, out float pz);
+                if (onPlane && Mathf.Abs(px) <= 1f && Mathf.Abs(pz) <= 1f)
                 {
                     _mode = MODE_ADD_DROPS;
-                    _prevDrop = pointOnPlane;
+                    _prevDrop = new Vector3(px, 0f, pz); // store POOL coords
                     _forceDrop = true; // the initial press always injects one ripple
                     DuringDrag(m);
                 }
@@ -390,24 +581,26 @@ namespace WebGLWater
                 {
                     Ray ray = PixelRay(m);
                     Vector3 eye = ray.origin, d = ray.direction;
-                    Vector3 p = eye + d * (-eye.y / d.y);
+                    if (!TryPickSurface(eye, d, out Vector3 hit, out float px, out float pz)) break;
 
-                    // Throttle injection by distance travelled so holding the cursor
-                    // still doesn't pump energy into the same texels every frame.
-                    float moved = Vector2.Distance(new Vector2(p.x, p.z), new Vector2(_prevDrop.x, _prevDrop.z));
+                    // Throttle injection by pool-space distance travelled so holding the
+                    // cursor still doesn't pump energy into the same texels every frame.
+                    float moved = Vector2.Distance(new Vector2(px, pz), new Vector2(_prevDrop.x, _prevDrop.z));
                     if (!_forceDrop && moved < MinDragRippleSpacing) break;
                     _forceDrop = false;
 
-                    _water.AddDrop(p.x, p.z, rippleRadius, rippleStrength);
+                    // rippleRadius/rippleStrength are WORLD-sized, so the click feels the
+                    // same regardless of volume scale; convert to pool units for the sim.
+                    _water.AddDrop(px, pz, rippleRadius / VolumeHorizontalExtent, rippleStrength / VolumeExtentSafe.y);
 
-                    // splash droplets where the cursor drags across the surface
+                    // splash droplets where the cursor drags across the surface (world space)
                     if (splashEmitter != null)
                     {
                         float strength = Mathf.Clamp01(moved / 0.08f);
                         if (strength > 0.1f)
-                            splashEmitter.EmitSplash(new Vector3(p.x, 0f, p.z), strength * 0.6f, rippleRadius * 4f);
+                            splashEmitter.EmitSplash(hit, strength * 0.6f, rippleRadius * 4f);
                     }
-                    _prevDrop = p;
+                    _prevDrop = new Vector3(px, 0f, pz);
                     break;
                 }
                 case MODE_ORBIT:

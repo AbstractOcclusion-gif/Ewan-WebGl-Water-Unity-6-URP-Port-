@@ -35,6 +35,7 @@ Shader "WebGLWater/WaterReceiver"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
             #include "WaterFog.hlsl"
+            #include "WaterVolume.hlsl"
 
             TEXTURE2D(_BaseMap);    SAMPLER(sampler_BaseMap);
             TEXTURE2D(_CausticTex); SAMPLER(sampler_CausticTex);
@@ -74,20 +75,23 @@ Shader "WebGLWater/WaterReceiver"
                 float3 ambient = SampleSH(N);
                 float3 color = albedo * (ambient + mainLight.color * (ndl * mainLight.shadowAttenuation));
 
-                // projected caustics where this point is below the (rippled) surface
-                float2 wuv = IN.positionWS.xz * 0.5 + 0.5;
+                // projected caustics where this point is below the (rippled) surface.
+                // Sim height + caustics live in pool space, so convert the world point.
+                float3 poolPos = WorldToPool(IN.positionWS);
+                float2 wuv = poolPos.xz * 0.5 + 0.5;
                 float simH = SAMPLE_TEXTURE2D(_WaterTex, sampler_WaterTex, wuv).r;
-                if (IN.positionWS.y < _WaterLevel + simH)
+                if (poolPos.y < simH)
                 {
                     float3 refractedLight = -refract(-_LightDir, float3(0,1,0), 1.0/1.333);
-                    float2 cuv = 0.75 * (IN.positionWS.xz - IN.positionWS.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
+                    float2 cuv = 0.75 * (poolPos.xz - poolPos.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
                     float caustic = SAMPLE_TEXTURE2D(_CausticTex, sampler_CausticTex, cuv).r;
                     color += albedo * _CausticTint.rgb * (caustic * _CausticStrength * mainLight.shadowAttenuation);
                     color *= _UnderwaterTint.rgb;
                 }
 
-                // depth absorption (shared with the surface so fog is consistent)
-                color = ApplyWaterFog(color, WaterPathLength(IN.positionWS, _WorldSpaceCameraPos, _WaterLevel));
+                // depth absorption (shared with the surface so fog is consistent); the
+                // surface sits at the volume centre's world Y.
+                color = ApplyWaterFog(color, WaterPathLength(IN.positionWS, _WorldSpaceCameraPos, _VolumeCenter.y));
                 return half4(color, 1);
             }
             ENDHLSL

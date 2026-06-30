@@ -36,6 +36,7 @@ Shader "WebGLWater/PoolWall"
             // resolve via the auto-included HLSLSupport in URP HLSLPROGRAM blocks.
             #include "WaterCommon.hlsl"
             #include "WaterFog.hlsl"
+            #include "WaterVolume.hlsl"
 
             float _ObjectShadowStrength;
 
@@ -43,15 +44,18 @@ Shader "WebGLWater/PoolWall"
             struct v2f
             {
                 float4 pos      : SV_POSITION;
-                float3 position : TEXCOORD0;
+                float3 position : TEXCOORD0; // POOL space, for the analytic wall look
+                float3 worldPos : TEXCOORD1; // world space, for shadows + fog
             };
 
             v2f vert(appdata v)
             {
                 v2f o;
-                float3 wpos = TransformObjectToWorld(v.vertex.xyz);
-                o.position = wpos;
-                o.pos = TransformWorldToHClip(wpos);
+                float3 poolPos = v.vertex.xyz;          // pool mesh authored in [-1,1]
+                float3 worldPos = PoolToWorld(poolPos); // placed by the volume frame
+                o.position = poolPos;
+                o.worldPos = worldPos;
+                o.pos = TransformWorldToHClip(worldPos);
                 return o;
             }
 
@@ -62,12 +66,12 @@ Shader "WebGLWater/PoolWall"
                 if (i.position.y < info.r) color *= UNDERWATER_COLOR * 1.2;
 
                 // receive real object shadows from the scene's directional light
-                float4 shadowCoord = TransformWorldToShadowCoord(i.position);
+                float4 shadowCoord = TransformWorldToShadowCoord(i.worldPos);
                 Light mainLight = GetMainLight(shadowCoord);
                 color *= lerp(1.0, mainLight.shadowAttenuation, _ObjectShadowStrength);
 
-                // depth absorption (shared fog; pool surface sits at y = 0)
-                color = ApplyWaterFog(color, WaterPathLength(i.position, _WorldSpaceCameraPos, 0.0));
+                // depth absorption (shared fog; pool surface sits at the volume centre's Y)
+                color = ApplyWaterFog(color, WaterPathLength(i.worldPos, _WorldSpaceCameraPos, _VolumeCenter.y));
 
                 return half4(color, 1);
             }

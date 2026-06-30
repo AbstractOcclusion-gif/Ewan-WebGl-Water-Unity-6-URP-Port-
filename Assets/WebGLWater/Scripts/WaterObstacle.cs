@@ -22,7 +22,8 @@ namespace WebGLWater
         static readonly int ID_Waterline = Shader.PropertyToID("_WaterlineY");
         static readonly int ID_DisplaceScale = Shader.PropertyToID("_DisplaceScale");
 
-        public WaterObstacle(Shader obstacleShader, int resolution, float waterY)
+        public WaterObstacle(Shader obstacleShader, int resolution, Vector3 volumeCenter,
+                             Quaternion volumeRotation, Vector3 volumeExtent)
         {
             _res = resolution;
             _mat = new Material(obstacleShader);
@@ -31,15 +32,20 @@ namespace WebGLWater
             _prev = Create();
             _curr = Create();
 
-            // Top-down orthographic view over the pool: x,z in [-1,1] -> the RT,
-            // looking straight down (-Y) from just above the surface. Up = +Z so the
-            // RT's u<->x and v<->z (the sim's coordinate convention).
-            Vector3 eye = new Vector3(0f, waterY + 2f, 0f);
-            Quaternion rot = Quaternion.LookRotation(Vector3.down, Vector3.forward);
+            // Orthographic view looking DOWN the volume's up axis, so the submerged
+            // footprint maps into the RT along the same axis the surface is displaced.
+            // Extents (X half-width, Z half-length) set the ortho size; up = volume forward
+            // so the RT's u<->pool x and v<->pool z (the sim's coordinate convention).
+            float ex = Mathf.Max(volumeExtent.x, 1e-4f);
+            float ez = Mathf.Max(volumeExtent.z, 1e-4f);
+            float ey = Mathf.Max(volumeExtent.y, 1e-4f);
+            Vector3 up = volumeRotation * Vector3.up;
+            Vector3 eye = volumeCenter + up * (2f * ey);
+            Quaternion rot = Quaternion.LookRotation(-up, volumeRotation * Vector3.forward);
             Matrix4x4 camToWorld = Matrix4x4.TRS(eye, rot, Vector3.one);
             _view = Matrix4x4.Scale(new Vector3(1f, 1f, -1f)) * camToWorld.inverse;
 
-            Matrix4x4 proj = Matrix4x4.Ortho(-1f, 1f, -1f, 1f, 0.01f, 10f);
+            Matrix4x4 proj = Matrix4x4.Ortho(-ex, ex, -ez, ez, 0.01f, 4f * ey + 0.02f);
             _gpuProj = GL.GetGPUProjectionMatrix(proj, true); // renderIntoTexture = true
         }
 

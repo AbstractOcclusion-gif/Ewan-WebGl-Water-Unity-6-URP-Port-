@@ -103,14 +103,11 @@ namespace WebGLWater.EditorTools
             var sfGodRays = Shader.Find("WebGLWater/GodRays");
             if (sfGodRays != null)
             {
-                var god = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                god.name = "God Rays";
-                Object.DestroyImmediate(god.GetComponent<Collider>());
-                god.transform.SetParent(root.transform);
-                god.transform.position = new Vector3(0f, -0.5f, 0f);   // spans y in [-1, 0]
-                god.transform.localScale = new Vector3(2f, 1f, 2f);    // spans x,z in [-1, 1]
+                // Pool-space box ([-1,0] in y, [-1,1] in x,z) with an IDENTITY transform;
+                // the GodRays shader places it via the volume frame, like the surface/pool.
+                var god = CreateRenderer("God Rays", SaveAsset(BuildGodRayBox(), Gen + "/GodRayBox.asset"),
+                                         new Material(sfGodRays), root.transform);
                 var gmr = god.GetComponent<MeshRenderer>();
-                gmr.sharedMaterial = new Material(sfGodRays);
                 gmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 gmr.receiveShadows = false;
             }
@@ -254,9 +251,10 @@ namespace WebGLWater.EditorTools
             var mesh = new Mesh { name = "WaterGrid", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
             mesh.vertices = verts;
             mesh.triangles = tris;
-            // Real geometry is displaced into the XZ plane in the shader, so use
-            // explicit bounds covering the pool volume to avoid wrong frustum culling.
-            mesh.bounds = new Bounds(Vector3.zero, new Vector3(3f, 3f, 3f));
+            // Geometry is displaced into the XZ plane AND placed by the volume frame in
+            // the shader, so use large explicit bounds to avoid wrong frustum culling
+            // when the volume is scaled or offset.
+            mesh.bounds = new Bounds(Vector3.zero, Vector3.one * 1000f);
             return mesh;
         }
 
@@ -289,6 +287,40 @@ namespace WebGLWater.EditorTools
             mesh.SetVertices(v);
             mesh.SetTriangles(t, 0);
             mesh.RecalculateNormals();
+            // Placed by the volume frame in the shader; large bounds avoid wrong culling.
+            mesh.bounds = new Bounds(Vector3.zero, Vector3.one * 1000f);
+            return mesh;
+        }
+
+        // Closed box in POOL space: y in [-1,0], x,z in [-1,1]. Outward-wound (like a
+        // primitive cube) so the GodRays pass's Cull Front renders the back faces. The
+        // shader places it via the volume frame, so the bounds are made large to avoid
+        // wrong frustum culling when the volume is scaled or offset.
+        static Mesh BuildGodRayBox()
+        {
+            const float lo = -1f, hi = 0f;
+            var v = new System.Collections.Generic.List<Vector3>();
+            var t = new System.Collections.Generic.List<int>();
+
+            void Quad(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3)
+            {
+                int i = v.Count;
+                v.Add(p0); v.Add(p1); v.Add(p2); v.Add(p3);
+                t.Add(i); t.Add(i + 1); t.Add(i + 2);
+                t.Add(i); t.Add(i + 2); t.Add(i + 3);
+            }
+
+            Quad(new Vector3(-1, hi, -1), new Vector3(-1, hi, 1), new Vector3(1, hi, 1), new Vector3(1, hi, -1));   // +y
+            Quad(new Vector3(-1, lo, -1), new Vector3(1, lo, -1), new Vector3(1, lo, 1), new Vector3(-1, lo, 1));   // -y
+            Quad(new Vector3(-1, lo, -1), new Vector3(-1, hi, -1), new Vector3(1, hi, -1), new Vector3(1, lo, -1)); // -z
+            Quad(new Vector3(1, lo, 1), new Vector3(1, hi, 1), new Vector3(-1, hi, 1), new Vector3(-1, lo, 1));     // +z
+            Quad(new Vector3(-1, lo, 1), new Vector3(-1, hi, 1), new Vector3(-1, hi, -1), new Vector3(-1, lo, -1)); // -x
+            Quad(new Vector3(1, lo, -1), new Vector3(1, hi, -1), new Vector3(1, hi, 1), new Vector3(1, lo, 1));     // +x
+
+            var mesh = new Mesh { name = "GodRayBox" };
+            mesh.SetVertices(v);
+            mesh.SetTriangles(t, 0);
+            mesh.bounds = new Bounds(Vector3.zero, Vector3.one * 1000f);
             return mesh;
         }
 

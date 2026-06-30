@@ -54,9 +54,12 @@ Shader "WebGLWater/WaterSurface"
             #include "UnityCG.cginc"
             #include "WaterCommon.hlsl"
             #include "WaterFog.hlsl"
+            #include "WaterWaves.hlsl"
+            #include "WaterVolume.hlsl"
 
             float _Underwater;
             float _ReflectionStrength;
+            float _WaveNormalStrength; // global; scales the wind-wave tilt on the normal
             float3 _SunColor; // Unity directional light color * intensity (global)
 
             sampler2D _PlanarReflectionTex;
@@ -116,18 +119,22 @@ Shader "WebGLWater/WaterSurface"
             struct v2f
             {
                 float4 pos      : SV_POSITION;
-                float3 position : TEXCOORD0;
+                float3 position : TEXCOORD0; // POOL space ([-1,1]); drives the analytic tracer
                 float4 screenPos: TEXCOORD1;
+                float3 worldPos : TEXCOORD2; // world space; drives depth/SSR/foam-contact
             };
 
             v2f vert(appdata v)
             {
                 v2f o;
                 float4 info = tex2Dlod(_WaterTex, float4(v.vertex.xy * 0.5 + 0.5, 0, 0));
-                float3 position = v.vertex.xzy;   // grid XY plane -> world (x, 0, z)
-                position.y += info.r;
-                o.position = position;
-                o.pos = mul(UNITY_MATRIX_VP, float4(position, 1.0));
+                float3 position = v.vertex.xzy;   // grid XY plane -> pool (x, 0, z)
+                position.y += info.r;                  // interactive ripple heightfield
+                position.y += WaveHeight(v.vertex.xy); // ambient wind-wave layer (pool xz = vertex.xy)
+                o.position = position;                 // keep pool-space position for the tracer
+                float3 worldPos = PoolToWorld(position);
+                o.worldPos = worldPos;
+                o.pos = mul(UNITY_MATRIX_VP, float4(worldPos, 1.0));
                 o.screenPos = ComputeScreenPos(o.pos);
                 return o;
             }
@@ -141,30 +148,37 @@ Shader "WebGLWater/WaterSurface"
                 return tex2D(_PlanarReflectionTex, saturate(uv)).rgb;
             }
 
-            float3 getSurfaceRayColor(float3 origin, float3 ray, float3 waterColor)
+            // Shade a WORLD-space ray (origin + direction) against the analytic pool/sky.
+            // The pool box is intersected in POOL space (where it is the unit box), so any
+            // volume rotation or non-uniform extent is handled exactly, while the sky
+            // lookup and sun glint use the WORLD ray - which keeps reflections/refraction
+            // angle-correct for rotated or rectangular volumes.
+            float3 getSurfaceRayColor(float3 worldOrigin, float3 worldRay, float3 waterColor)
             {
+                float3 po = WorldToPool(worldOrigin);
+                float3 pd = WorldDirToPool(worldRay);
                 float3 color;
-                if (ray.y < 0.0)
+                if (worldRay.y < 0.0)
                 {
-                    float2 t = IntersectCube(origin, ray, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));
-                    color = GetWallColor(origin + ray * t.y);
+                    float2 t = IntersectCube(po, pd, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));
+                    color = GetWallColor(po + pd * t.y);
                 }
                 else
                 {
-                    float2 t = IntersectCube(origin, ray, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));
-                    float3 hit = origin + ray * t.y;
+                    float2 t = IntersectCube(po, pd, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));
+                    float3 hit = po + pd * t.y;
                     if (hit.y < 2.0 / 12.0)
                     {
                         color = GetWallColor(hit);
                     }
                     else
                     {
-                        color = texCUBE(_Sky, ray).rgb;
+                        color = texCUBE(_Sky, worldRay).rgb;
                         // sun glint - direction from _LightDir, tint/brightness from the Unity sun
-                        color += float3(10.0, 8.0, 6.0) * _SunColor * pow(max(0.0, dot(_LightDir, ray)), 5000.0);
+                        color += float3(10.0, 8.0, 6.0) * _SunColor * pow(max(0.0, dot(_LightDir, worldRay)), 5000.0);
                     }
                 }
-                if (ray.y < 0.0) color *= waterColor;
+                if (worldRay.y < 0.0) color *= waterColor;
                 return color;
             }
 
@@ -181,8 +195,15 @@ Shader "WebGLWater/WaterSurface"
                     info = tex2D(_WaterTex, coord);
                 }
 
-                float3 normal = float3(info.b, sqrt(1.0 - dot(info.ba, info.ba)), info.a);
-                float3 incomingRay = normalize(i.position - _Eye);
+                // Combine the ripple normal (info.ba = normal.xz) with the wind-wave
+                // tilt. A height gradient g contributes normal.xz = -g, so the two
+                // slopes simply add in the xz components before re-deriving y.
+                float2 nxz = info.ba - WaveSlope(i.position.xz) * _WaveNormalStrength;
+                float3 normalPool = float3(nxz.x, sqrt(max(1e-4, 1.0 - dot(nxz, nxz))), nxz.y);
+                // World-space surface normal + view ray, so reflection/refraction angles
+                // are correct even when the volume is rotated or has a rectangular footprint.
+                float3 normal = PoolNormalToWorld(normalPool);
+                float3 incomingRay = normalize(i.worldPos - _WorldSpaceCameraPos);
 
                 if (_Underwater > 0.5)
                 {
@@ -191,8 +212,8 @@ Shader "WebGLWater/WaterSurface"
                     float3 refractedRay = refract(incomingRay, normal, IOR_WATER / IOR_AIR);
                     float fresnel = lerp(0.5, 1.0, pow(1.0 - dot(normal, -incomingRay), 3.0));
 
-                    float3 reflectedColor = getSurfaceRayColor(i.position, reflectedRay, UNDERWATER_COLOR);
-                    float3 refractedColor = getSurfaceRayColor(i.position, refractedRay, float3(1.0, 1.0, 1.0)) * float3(0.8, 1.0, 1.1);
+                    float3 reflectedColor = getSurfaceRayColor(i.worldPos, reflectedRay, UNDERWATER_COLOR);
+                    float3 refractedColor = getSurfaceRayColor(i.worldPos, refractedRay, float3(1.0, 1.0, 1.0)) * float3(0.8, 1.0, 1.1);
 
                     // Real transparency from below: sample the live scene above the surface.
                 #if defined(_REAL_REFRACTION)
@@ -210,8 +231,8 @@ Shader "WebGLWater/WaterSurface"
                     float3 refractedRay = refract(incomingRay, normal, IOR_AIR / IOR_WATER);
                     float fresnel = lerp(0.25, 1.0, pow(1.0 - dot(normal, -incomingRay), 3.0));
 
-                    float3 reflectedColor = getSurfaceRayColor(i.position, reflectedRay, ABOVEWATER_COLOR);
-                    float3 refractedColor = getSurfaceRayColor(i.position, refractedRay, ABOVEWATER_COLOR);
+                    float3 reflectedColor = getSurfaceRayColor(i.worldPos, reflectedRay, ABOVEWATER_COLOR);
+                    float3 refractedColor = getSurfaceRayColor(i.worldPos, refractedRay, ABOVEWATER_COLOR);
 
                     // ---- Reflection: analytic -> planar -> SSR (SSR wins where it hits) ----
                 #if defined(_USE_PLANAR)
@@ -219,7 +240,7 @@ Shader "WebGLWater/WaterSurface"
                 #endif
                 #if defined(_USE_SSR)
                     float ssrHit;
-                    float3 ssr = MarchSSR(i.position, reflectedRay, ssrHit);
+                    float3 ssr = MarchSSR(i.worldPos, reflectedRay, ssrHit); // SSR marches in world space
                     reflectedColor = lerp(reflectedColor, ssr, ssrHit * _SSRStrength);
                 #endif
 
@@ -235,8 +256,13 @@ Shader "WebGLWater/WaterSurface"
                     // fogged by the geometry shaders, so we only fog the ANALYTIC pool
                     // here - avoids double-fogging what's seen through the surface. ----
                 #if !defined(_REAL_REFRACTION)
-                    float2 tfog = IntersectCube(i.position, refractedRay, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));
-                    refractedColor = ApplyWaterFog(refractedColor, max(0.0, tfog.y));
+                    // Fog distance is the WORLD length of the refracted segment through the
+                    // pool, found by intersecting the unit box in pool space then measuring
+                    // the world chord (correct under non-uniform extent / rotation).
+                    float3 pdFog = WorldDirToPool(refractedRay);
+                    float2 tfog = IntersectCube(i.position, pdFog, float3(-1.0, -POOL_HEIGHT, -1.0), float3(1.0, 2.0, 1.0));
+                    float3 exitWorld = PoolToWorld(i.position + pdFog * max(0.0, tfog.y));
+                    refractedColor = ApplyWaterFog(refractedColor, length(exitWorld - i.worldPos));
                 #endif
 
                     float3 outColor = lerp(refractedColor, reflectedColor, fresnel * _ReflectionStrength);
@@ -259,7 +285,7 @@ Shader "WebGLWater/WaterSurface"
                         // BEHIND the surface, else none. Fixes "all water foamed" builds.
                         float2 suv = i.screenPos.xy / max(i.screenPos.w, 1e-5);
                         float sceneEye = LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_CameraDepthTexture, float4(suv, 0, 0)));
-                        float surfEye  = -mul(UNITY_MATRIX_V, float4(i.position, 1.0)).z;
+                        float surfEye  = -mul(UNITY_MATRIX_V, float4(i.worldPos, 1.0)).z;
                         float behind   = sceneEye - surfEye; // > 0 when scene sits below the surface
                         float contact  = behind > 0.0 ? (1.0 - saturate(behind / max(_FoamContactDepth, 1e-4))) : 0.0;
 

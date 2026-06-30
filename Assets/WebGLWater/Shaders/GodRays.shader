@@ -3,11 +3,15 @@
 // (x,z in [-1,1], y in [-1,0]). The fragment ray-marches the view ray through the
 // volume and accumulates the projected caustic intensity at each step, so bright
 // focused light becomes vertical shafts that flicker in sync with the floor
-// caustics and follow the sun. No post-processing feature required.
+// caustics and follow the sun.
 //
-// Renders after the water (Transparent+100), additively, ignoring the water
-// surface depth; occlusion against solid geometry is done per-step against the
-// camera depth texture (which contains opaque geometry only).
+// HYBRID shadow shafts: each marched sample is additionally multiplied by the main
+// light's realtime shadow at that point, so floating objects carve dark silhouette
+// beams through the haze WITHOUT losing the caustic shimmer that reads as underwater.
+//
+// Renders after the water (Transparent+100), additively, ignoring the water surface
+// depth; occlusion against solid geometry is done per-step against the camera depth
+// texture (opaque geometry only).
 Shader "WebGLWater/GodRays"
 {
     Properties
@@ -18,79 +22,134 @@ Shader "WebGLWater/GodRays"
     }
     SubShader
     {
-        Tags { "RenderType"="Transparent" "Queue"="Transparent+100" }
+        Tags { "RenderType"="Transparent" "Queue"="Transparent+100" "RenderPipeline"="UniversalPipeline" }
         Pass
         {
+            Name "GodRays"
+            Tags { "LightMode"="UniversalForward" }
+
             Blend One One       // additive glow
             ZWrite Off
             ZTest Always        // not occluded by the (transparent) water surface
             Cull Front          // render back faces so the volume covers the screen
 
-            CGPROGRAM
+            HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
             #pragma target 4.0
-            #include "UnityCG.cginc"
-            #include "WaterCommon.hlsl"
 
-            sampler2D _CameraDepthTexture;
-            float3 _SunColor;            // global, sun colour * intensity
-            float4 _GodRayColor;
-            float  _GodRayDensity, _GodRaySteps;
+            // Sample the main light's shadow MAP (cascades). The screen-space shadow
+            // variant is intentionally omitted: it is keyed to opaque-surface depth and
+            // would be wrong for arbitrary volumetric samples. Without a shadowmap the
+            // pass degrades gracefully to the original caustic-only shafts.
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT
 
-            struct appdata { float4 vertex : POSITION; };
-            struct v2f
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            #include "WaterVolume.hlsl"
+
+            #define IOR_AIR   1.0
+            #define IOR_WATER 1.333
+
+            TEXTURE2D(_CausticTex); SAMPLER(sampler_CausticTex);
+            float3 _LightDir;       // global, normalized direction toward the light
+            float3 _SunColor;       // global, sun colour * intensity
+
+            CBUFFER_START(UnityPerMaterial)
+                float4 _GodRayColor;
+                float  _GodRayDensity;
+                float  _GodRaySteps;
+            CBUFFER_END
+
+            // Slab intersection of a ray with an axis-aligned box; returns (tNear, tFar).
+            float2 IntersectCube(float3 origin, float3 ray, float3 cubeMin, float3 cubeMax)
             {
-                float4 pos  : SV_POSITION;
-                float3 wpos : TEXCOORD0;
-                float4 spos : TEXCOORD1;
+                float3 tMin = (cubeMin - origin) / ray;
+                float3 tMax = (cubeMax - origin) / ray;
+                float3 t1 = min(tMin, tMax);
+                float3 t2 = max(tMin, tMax);
+                float tNear = max(max(t1.x, t1.y), t1.z);
+                float tFar  = min(min(t2.x, t2.y), t2.z);
+                return float2(tNear, tFar);
+            }
+
+            // The box mesh is authored in POOL space ([-1,0] in y, [-1,1] in x,z) with an
+            // identity transform; the volume frame places it in the world.
+            struct Attributes { float4 positionOS : POSITION; };
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                float3 poolPos    : TEXCOORD0; // pool-space box position (drives the march)
+                float4 screenPos  : TEXCOORD1;
             };
 
-            v2f vert(appdata v)
+            Varyings vert(Attributes IN)
             {
-                v2f o;
-                o.wpos = mul(unity_ObjectToWorld, v.vertex).xyz;
-                o.pos  = UnityObjectToClipPos(v.vertex);
-                o.spos = ComputeScreenPos(o.pos);
+                Varyings o;
+                // The object's own transform defines the POOL-space box ([-1,0] in y,
+                // [-1,1] in x,z), whether that's an identity-transform pool-space mesh
+                // (rebuilt scene) or the legacy unit cube scaled (2,1,2) at (0,-0.5,0).
+                // The volume frame then places that pool box in the world.
+                float3 poolPos = TransformObjectToWorld(IN.positionOS.xyz);
+                float3 worldPos = PoolToWorld(poolPos);
+                o.poolPos = poolPos;
+                o.positionCS = TransformWorldToHClip(worldPos);
+
+                // manual ComputeScreenPos (handles the platform V-flip)
+                float4 ndc = o.positionCS * 0.5;
+                ndc.xy = float2(ndc.x, ndc.y * _ProjectionParams.x) + ndc.w;
+                ndc.zw = o.positionCS.zw;
+                o.screenPos = ndc;
                 return o;
             }
 
-            fixed4 frag(v2f i) : SV_Target
+            half4 frag(Varyings IN) : SV_Target
             {
-                float3 ro = _WorldSpaceCameraPos;
-                float3 rd = normalize(i.wpos - ro);
+                // March in POOL space: caustics + the box bounds live there. Convert each
+                // sample back to world only for the depth test and the shadow lookup.
+                float3 roPool = WorldToPool(_WorldSpaceCameraPos);
+                float3 rdPool = normalize(IN.poolPos - roPool);
 
-                // clip the view ray to the pool interior (floor y=-1 to surface y=0)
-                float2 t = IntersectCube(ro, rd, float3(-1.0, -1.0, -1.0), float3(1.0, 0.0, 1.0));
+                float2 t = IntersectCube(roPool, rdPool, float3(-1.0, -1.0, -1.0), float3(1.0, 0.0, 1.0));
                 float tEnter = max(t.x, 0.0);
                 float tExit  = t.y;
-                if (tExit <= tEnter) return fixed4(0,0,0,0);
+                if (tExit <= tEnter) return half4(0, 0, 0, 0);
 
-                float2 uv = i.spos.xy / max(i.spos.w, 1e-5);
-                float sceneEye = LinearEyeDepth(SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, uv));
+                float2 uv = IN.screenPos.xy / max(IN.screenPos.w, 1e-5);
+                float sceneEye = LinearEyeDepth(SampleSceneDepth(uv), _ZBufferParams);
 
                 int steps = (int)_GodRaySteps;
                 float dt = (tExit - tEnter) / steps;
-                float3 refractedLight = -refract(-_LightDir, float3(0,1,0), IOR_AIR / IOR_WATER);
+                float3 refractedLight = -refract(-_LightDir, float3(0, 1, 0), IOR_AIR / IOR_WATER);
 
                 float accum = 0.0;
                 [loop]
                 for (int s = 0; s < steps; s++)
                 {
                     float tt = tEnter + (s + 0.5) * dt;
-                    float3 p = ro + rd * tt;
-                    float pe = -mul(UNITY_MATRIX_V, float4(p, 1.0)).z; // eye depth of sample
-                    if (pe > sceneEye) break;                         // behind solid geometry
+                    float3 pPool = roPool + rdPool * tt;
+                    float3 pWorld = PoolToWorld(pPool);
+                    float pe = -mul(UNITY_MATRIX_V, float4(pWorld, 1.0)).z; // eye depth of sample
+                    if (pe > sceneEye) break;                              // behind solid geometry
 
                     // project the sample down the refracted light onto the caustic map
-                    float2 cuv = 0.75 * (p.xz - p.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
-                    accum += tex2Dlod(_CausticTex, float4(cuv, 0, 0)).r;
+                    float2 cuv = 0.75 * (pPool.xz - pPool.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
+                    float caustic = SAMPLE_TEXTURE2D_LOD(_CausticTex, sampler_CausticTex, cuv, 0).r;
+
+                    // hybrid: occlude this sample by the main light's shadow so solid
+                    // objects punch dark shafts while the caustic flicker is preserved.
+                    float4 shadowCoord = TransformWorldToShadowCoord(pWorld);
+                    float shadow = MainLightRealtimeShadow(shadowCoord);
+
+                    accum += caustic * shadow;
                 }
                 accum *= dt * _GodRayDensity;
 
-                return fixed4(_GodRayColor.rgb * _SunColor * accum, 1.0);
+                return half4(_GodRayColor.rgb * _SunColor * accum, 1.0);
             }
-            ENDCG
+            ENDHLSL
         }
     }
 }
