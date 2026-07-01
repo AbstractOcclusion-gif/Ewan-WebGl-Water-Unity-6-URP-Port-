@@ -45,7 +45,7 @@ namespace WebGLWater
 
         Rigidbody _rb;
         Collider _col;
-        WaterController _ctrl;
+        WaterVolume _ctrl;
 
         // Float points in the body's local space, plus the world-space sphere radius
         // used for the per-point submerged-volume (sphere-cap) calculation.
@@ -61,8 +61,8 @@ namespace WebGLWater
         void Start()
         {
             BuildSamplePoints();
-            if (WaterController.Resolve() == null)
-                Debug.LogWarning("WaterBuoyancy: no WaterController in the scene; object will not float.");
+            if (WaterVolume.Resolve() == null)
+                Debug.LogWarning("WaterBuoyancy: no WaterVolume in the scene; object will not float.");
         }
 
         // Lay out a lattice of float points across the collider's local bounding box and
@@ -117,7 +117,7 @@ namespace WebGLWater
         {
             // Re-resolve every step so an object that drifts between lakes floats on the one
             // it is currently in (cheap: a handful of bodies).
-            _ctrl = WaterController.BodyContaining(transform.position);
+            _ctrl = WaterVolume.BodyContaining(transform.position);
             if (_ctrl == null || _localPoints == null || _localPoints.Length == 0) return;
 
             float g = Physics.gravity.magnitude;

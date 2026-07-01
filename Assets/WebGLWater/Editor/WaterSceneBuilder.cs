@@ -2,7 +2,7 @@
 // Menu: Tools > WebGL Water > Build Scene
 //
 // Generates the grid mesh, a procedural sky cubemap (and a fallback
-// tile texture), the materials, and wires up the camera + WaterController.
+// tile texture), the materials, and wires up the camera + WaterVolume.
 // The analytic pool (walls/floor rendered by PoolWall.shader, which shows the
 // caustics) is OPTIONAL - leave it off if you've built your own pool.
 using System.IO;
@@ -17,6 +17,16 @@ namespace WebGLWater.EditorTools
         const string Root = "Assets/WebGLWater";
         const string Gen = "Assets/WebGLWater/Generated";
         const int GridDetail = 200;
+        const int SkyCubemapSize = 128;
+        const string WaterVolumePrefabPath = Root + "/WaterVolume.prefab";
+        const string WaterVolumeObjectName = "WaterVolume";
+
+        // The water shaders + compute, loaded and validated once (see TryLoadShaders).
+        struct ShaderSet
+        {
+            public Shader Water, Pool, Caustics, Obstacle, Receiver;
+            public ComputeShader Compute;
+        }
 
         // Shader names (keep in sync with the Shader "..." declarations in Shaders/).
         const string ShaderWaterSurface = "WebGLWater/WaterSurface";
@@ -38,29 +48,64 @@ namespace WebGLWater.EditorTools
         [MenuItem("Tools/WebGL Water/Build Scene (water only - keep my pool)")]
         static void BuildWaterOnly() => Build(false);
 
+        // A tidy, reusable single-body prefab: one WaterVolume + its two water renderers, with
+        // the asset refs (compute, shaders, mesh, materials, sky, tiles, quality) baked in. Scene
+        // refs (camera, sun) resolve themselves at runtime, so it works when dropped into a scene.
+        [MenuItem("Tools/WebGL Water/Create WaterVolume Prefab (water only)")]
+        static void CreateWaterVolumePrefab()
+        {
+            if (!AssetDatabase.IsValidFolder(Gen))
+                AssetDatabase.CreateFolder(Root, "Generated");
+            if (!TryLoadShaders(out ShaderSet shaders)) return;
+
+            var gridMesh = SaveAsset(BuildGrid(GridDetail), Gen + "/WaterGrid.asset");
+            var sky = SaveCubemap(BuildSky(SkyCubemapSize), Gen + "/SkyCubemap.cubemap");
+            var tiles = LoadOrBuildTiles(Gen + "/Tiles.png");
+            var (matAbove, matUnder, _) = CreateWaterMaterials(shaders.Water, shaders.Pool, buildAnalyticPool: false);
+
+            var root = new GameObject(WaterVolumeObjectName);
+            var volume = root.AddComponent<WaterVolume>();
+            var above = CreateRenderer("Water (above)", gridMesh, matAbove, root.transform);
+            var under = CreateRenderer("Water (under)", gridMesh, matUnder, root.transform);
+
+            volume.simCompute = shaders.Compute;
+            volume.causticsShader = shaders.Caustics;
+            volume.obstacleShader = shaders.Obstacle;
+            volume.waterMesh = gridMesh;
+            volume.tiles = tiles;
+            volume.sky = sky;
+            volume.quality = LoadOrCreateWaterQuality(Gen + "/WaterQuality.asset");
+            volume.surfaceAbove = above.GetComponent<Renderer>();
+            volume.surfaceUnder = under.GetComponent<Renderer>();
+            volume.isPrimary = true;
+
+            var prefab = PrefabUtility.SaveAsPrefabAsset(root, WaterVolumePrefabPath);
+            Object.DestroyImmediate(root); // remove the temp build object; only the prefab persists
+            AssetDatabase.SaveAssets();
+
+            if (prefab == null)
+            {
+                Debug.LogError($"[WebGL Water] Failed to save the WaterVolume prefab at {WaterVolumePrefabPath}.");
+                return;
+            }
+
+            Selection.activeObject = prefab;
+            Debug.Log($"[WebGL Water] WaterVolume prefab created at {WaterVolumePrefabPath}. " +
+                      "Drop it into a scene with a camera - it resolves the camera and sun automatically.");
+        }
+
         static void Build(bool buildAnalyticPool)
         {
             if (!AssetDatabase.IsValidFolder(Gen))
                 AssetDatabase.CreateFolder(Root, "Generated");
 
             // ---- shaders ----
-            var sfWater    = Shader.Find(ShaderWaterSurface);
-            var sfPool     = Shader.Find(ShaderPoolWall);
-            var sfCaust    = Shader.Find(ShaderCaustics);
-            var sfObstacle = Shader.Find(ShaderObstacle);
-            var sfReceiver = Shader.Find(ShaderReceiver);
-            var compute    = AssetDatabase.LoadAssetAtPath<ComputeShader>(Root + "/Shaders/WaterSim.compute");
+            if (!TryLoadShaders(out ShaderSet shaders)) return;
+            var sfWater = shaders.Water; var sfPool = shaders.Pool; var sfCaust = shaders.Caustics;
+            var sfObstacle = shaders.Obstacle; var sfReceiver = shaders.Receiver; var compute = shaders.Compute;
 
-            if (sfWater == null || sfCaust == null || compute == null)
-            {
-                EditorUtility.DisplayDialog("WebGL Water",
-                    "Could not find the shaders / compute shader. Make sure the WebGLWater/Shaders folder imported without errors, then try again.",
-                    "OK");
-                return;
-            }
-
-            // Optional shaders degrade gracefully but should say so, not fail silently.
-            if (sfObstacle == null) Debug.LogWarning($"[WebGL Water] Shader '{ShaderObstacle}' not found; object->water displacement will be disabled.");
+            // Demo-specific optional shaders degrade gracefully but should say so, not fail silently.
+            // (The required-shader check and the shared obstacle warning live in TryLoadShaders.)
             if (sfReceiver == null) Debug.LogWarning($"[WebGL Water] Shader '{ShaderReceiver}' not found; the demo crate will use its default material.");
             if (buildAnalyticPool && sfPool == null) Debug.LogWarning($"[WebGL Water] Shader '{ShaderPoolWall}' not found; the analytic pool will be skipped.");
 
@@ -68,7 +113,7 @@ namespace WebGLWater.EditorTools
             var gridMesh   = SaveAsset(BuildGrid(GridDetail),     Gen + "/WaterGrid.asset");
 
             // ---- textures ----
-            var sky   = SaveCubemap(BuildSky(128), Gen + "/SkyCubemap.cubemap");
+            var sky   = SaveCubemap(BuildSky(SkyCubemapSize), Gen + "/SkyCubemap.cubemap");
             var tiles = LoadOrBuildTiles(Gen + "/Tiles.png");
 
             // ---- materials ----
@@ -100,7 +145,7 @@ namespace WebGLWater.EditorTools
             // controller
             var ctrlGO = new GameObject("Water Controller");
             ctrlGO.transform.SetParent(root.transform);
-            var ctrl = ctrlGO.AddComponent<WaterController>();
+            var ctrl = ctrlGO.AddComponent<WaterVolume>();
             ctrl.simCompute = compute;
             ctrl.causticsShader = sfCaust;
             ctrl.obstacleShader = sfObstacle;
@@ -164,7 +209,9 @@ namespace WebGLWater.EditorTools
             {
                 var crateMat = new Material(sfReceiver);
                 crateMat.SetColor(PropBaseColor, new Color(0.82f, 0.52f, 0.30f));
-                crate.GetComponent<MeshRenderer>().sharedMaterial = crateMat;
+                // Persist as an asset so the crate keeps its material through save/reload and prefabbing
+                // (a transient `new Material` serializes to null -> magenta in the saved scene/prefab).
+                crate.GetComponent<MeshRenderer>().sharedMaterial = SaveMaterial(crateMat, Gen + "/Crate.mat");
             }
             var rb = crate.AddComponent<Rigidbody>();
             rb.mass = 0.4f;
@@ -183,8 +230,11 @@ namespace WebGLWater.EditorTools
 
             // Pool-space box ([-1,0] in y, [-1,1] in x,z) with an IDENTITY transform;
             // the GodRays shader places it via the volume frame, like the surface/pool.
+            // Persist the material as an asset so it survives save/reload/prefabbing (a transient
+            // `new Material` serializes to null -> the god-ray volume renders magenta).
+            var godRayMat = SaveMaterial(new Material(sfGodRays), Gen + "/GodRays.mat");
             var go = CreateRenderer("God Rays", SaveAsset(BuildGodRayBox(), Gen + "/GodRayBox.asset"),
-                                    new Material(sfGodRays), parent);
+                                    godRayMat, parent);
             var gmr = go.GetComponent<MeshRenderer>();
             gmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             gmr.receiveShadows = false;
@@ -254,7 +304,7 @@ namespace WebGLWater.EditorTools
             {
                 var dm = new Material(sfSprite) { mainTexture = LoadOrBuildDroplet(Gen + "/Droplet.png") };
                 dm.color = new Color(0.92f, 0.97f, 1f, 1f);
-                splashPSR.sharedMaterial = dm;
+                splashPSR.sharedMaterial = SaveMaterial(dm, Gen + "/SplashDroplet.mat");
             }
             splashPSR.renderMode = ParticleSystemRenderMode.Billboard;
             var splashEmitter = splashGO.AddComponent<WaterSplashEmitter>();
@@ -273,7 +323,7 @@ namespace WebGLWater.EditorTools
             {
                 var cm = new Material(sfSprite) { mainTexture = crownSheet };
                 cm.color = new Color(0.95f, 0.98f, 1f, 1f);
-                crownPSR.sharedMaterial = cm;
+                crownPSR.sharedMaterial = SaveMaterial(cm, Gen + "/SplashCrown.mat");
             }
             splashEmitter.crownParticles = crownPS;
             return splashEmitter;
@@ -286,23 +336,23 @@ namespace WebGLWater.EditorTools
         [MenuItem("Tools/WebGL Water/Add Water Body (secondary)")]
         static void AddSecondaryBody()
         {
-            var all = Object.FindObjectsByType<WaterController>(FindObjectsSortMode.None);
+            var all = Object.FindObjectsByType<WaterVolume>(FindObjectsSortMode.None);
             if (all == null || all.Length == 0)
             {
-                Debug.LogError("[WebGL Water] Build the scene first (no WaterController found).");
+                Debug.LogError("[WebGL Water] Build the scene first (no WaterVolume found).");
                 return;
             }
-            WaterController primary = System.Array.Find(all, c => c.isPrimary) ?? all[0];
+            WaterVolume primary = System.Array.Find(all, c => c.isPrimary) ?? all[0];
 
             var bodyRoot = new GameObject("Water Body (secondary)");
 
             // The frame IS the controller's transform. Offset it so the bodies sit side by side.
-            var frameGO = new GameObject("Frame (WaterController)");
+            var frameGO = new GameObject("Frame (WaterVolume)");
             frameGO.transform.SetParent(bodyRoot.transform);
             float offsetX = 2f * primary.volumeExtent.x + 1f;
             frameGO.transform.position = primary.transform.position + new Vector3(offsetX, 0f, 0f);
 
-            var ctrl = frameGO.AddComponent<WaterController>();
+            var ctrl = frameGO.AddComponent<WaterVolume>();
             ctrl.simCompute = primary.simCompute;
             ctrl.causticsShader = primary.causticsShader;
             ctrl.obstacleShader = primary.obstacleShader;
@@ -577,6 +627,33 @@ namespace WebGLWater.EditorTools
         }
 
         // ---------------------------------------------------------------- helpers
+        // Load + validate the water shaders. Fails fast (dialog + false) if a REQUIRED shader
+        // (surface, caustics, compute) is missing; optional shaders only warn so the feature that
+        // needs them degrades gracefully. Shared by the scene builder and the prefab builder.
+        static bool TryLoadShaders(out ShaderSet shaders)
+        {
+            shaders = new ShaderSet
+            {
+                Water = Shader.Find(ShaderWaterSurface),
+                Pool = Shader.Find(ShaderPoolWall),
+                Caustics = Shader.Find(ShaderCaustics),
+                Obstacle = Shader.Find(ShaderObstacle),
+                Receiver = Shader.Find(ShaderReceiver),
+                Compute = AssetDatabase.LoadAssetAtPath<ComputeShader>(Root + "/Shaders/WaterSim.compute")
+            };
+
+            if (shaders.Water == null || shaders.Caustics == null || shaders.Compute == null)
+            {
+                EditorUtility.DisplayDialog("WebGL Water",
+                    "Could not find the shaders / compute shader. Make sure the WebGLWater/Shaders folder imported without errors, then try again.",
+                    "OK");
+                return false;
+            }
+
+            if (shaders.Obstacle == null) Debug.LogWarning($"[WebGL Water] Shader '{ShaderObstacle}' not found; object->water displacement will be disabled.");
+            return true;
+        }
+
         static Material MakeMat(Shader s, System.Action<Material> cfg)
         {
             var m = new Material(s);

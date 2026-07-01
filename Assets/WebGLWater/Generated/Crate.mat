@@ -7,8 +7,8 @@ Material:
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_Name: Pool
-  m_Shader: {fileID: 4800000, guid: ee0b56b5b6cbbd64f93aac6d0f2acc57, type: 3}
+  m_Name: Crate
+  m_Shader: {fileID: 4800000, guid: 4bf26aec2f1180a4aa701bb7ec523aa5, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []
@@ -22,11 +22,18 @@ Material:
   m_LockedProperties: 
   m_SavedProperties:
     serializedVersion: 3
-    m_TexEnvs: []
+    m_TexEnvs:
+    - _BaseMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _Cull: 2
-    - _ObjectShadowStrength: 0.6
-    m_Colors: []
+    - _CausticStrength: 4
+    - _WaterLevel: 0
+    m_Colors:
+    - _BaseColor: {r: 0.82, g: 0.52, b: 0.3, a: 1}
+    - _CausticTint: {r: 1, g: 1, b: 1, a: 1}
+    - _UnderwaterTint: {r: 0.39999998, g: 0.9, b: 1, a: 1}
   m_BuildTextureStacks: []
   m_AllowLocking: 1

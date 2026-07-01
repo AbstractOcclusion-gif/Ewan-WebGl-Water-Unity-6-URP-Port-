@@ -16,7 +16,7 @@ using UnityEngine.InputSystem;
 namespace WebGLWater
 {
     [DefaultExecutionOrder(-50)]
-    public class WaterController : MonoBehaviour
+    public class WaterVolume : MonoBehaviour
     {
         [Header("Assigned by the scene builder")]
         public ComputeShader simCompute;
@@ -75,24 +75,24 @@ namespace WebGLWater
         /// <summary>The primary water body: the global fallback for objects without a
         /// <see cref="WaterMembership"/>. Per-object association goes through
         /// <see cref="BodyContaining"/>.</summary>
-        public static WaterController Primary { get; private set; }
+        public static WaterVolume Primary { get; private set; }
 
         /// <summary>Resolve the body an object should use when it isn't inside any specific
         /// one: the primary body, or any found body as a fallback. Prefer
         /// <see cref="BodyContaining"/> for objects that have a world position.</summary>
-        public static WaterController Resolve() => Primary != null ? Primary : FindFirstObjectByType<WaterController>();
+        public static WaterVolume Resolve() => Primary != null ? Primary : FindFirstObjectByType<WaterVolume>();
 
         /// <summary>The water body a world point belongs to: the body whose horizontal
         /// footprint contains the point, nearest-centre wins when several overlap, and the
         /// primary body as a fallback when the point is outside every footprint. Objects call
         /// this each frame so they float on, and are lit by, the lake they are actually in.</summary>
-        public static WaterController BodyContaining(Vector3 worldPoint)
+        public static WaterVolume BodyContaining(Vector3 worldPoint)
         {
-            WaterController best = null;
+            WaterVolume best = null;
             float bestSqr = float.MaxValue;
             for (int i = 0; i < Bodies.Count; i++)
             {
-                WaterController body = Bodies[i];
+                WaterVolume body = Bodies[i];
                 if (!body.WorldToPoolXZ(worldPoint, out _, out _)) continue;
 
                 // Tiebreak on HORIZONTAL distance to centre; the footprint ignores height,
@@ -106,7 +106,7 @@ namespace WebGLWater
 
         /// <summary>All live water bodies. Used by the primary's input router to send a
         /// click to whichever body's surface the ray hits, and by <see cref="BodyContaining"/>.</summary>
-        static readonly List<WaterController> Bodies = new List<WaterController>();
+        static readonly List<WaterVolume> Bodies = new List<WaterVolume>();
 
         [Header("Simulation")]
         [Tooltip("Direction TOWARD the light. Auto-driven from 'sun' when one is assigned.")]
@@ -256,7 +256,7 @@ namespace WebGLWater
         int _mode = MODE_NONE;
         Vector2 _oldMouse;
         Vector3 _prevWorld;         // last world-space ripple point during a drag
-        WaterController _dragBody;  // body being rippled this drag
+        WaterVolume _dragBody;  // body being rippled this drag
         bool _forceDrop;
 
         // shader global ids
@@ -289,7 +289,9 @@ namespace WebGLWater
 
         void OnEnable()
         {
-            if (simCompute == null) { Debug.LogError("WaterController: simCompute not assigned."); enabled = false; return; }
+            if (simCompute == null) { Debug.LogError("WaterVolume: simCompute not assigned."); enabled = false; return; }
+
+            ResolveSceneRefs(); // let a dropped-in prefab find the scene's camera/sun without manual wiring
 
             ApplyQuality();     // sets _simRes, causticResolution, _godRaysAllowed + god-ray steps
 
@@ -355,6 +357,27 @@ namespace WebGLWater
             _cb?.Release();
             if (_surfaceAboveInstance != null) { Destroy(_surfaceAboveInstance); _surfaceAboveInstance = null; }
             if (_surfaceUnderInstance != null) { Destroy(_surfaceUnderInstance); _surfaceUnderInstance = null; }
+        }
+
+        // Fill in the scene-level references a prefab can't carry, so dropping the WaterVolume
+        // prefab into a fresh scene "just works". Only unset fields are touched, so an explicitly
+        // wired scene (e.g. the demo builder) is left exactly as authored.
+        void ResolveSceneRefs()
+        {
+            if (targetCamera == null) targetCamera = Camera.main;
+            if (sun == null) sun = ResolveSun();
+            if (orbit == null && targetCamera != null) orbit = targetCamera.GetComponent<OrbitCamera>();
+            if (splashEmitter == null) splashEmitter = FindFirstObjectByType<WaterSplashEmitter>();
+        }
+
+        // The scene's key light: the lighting-settings sun if set, else the first directional light.
+        static Light ResolveSun()
+        {
+            if (RenderSettings.sun != null) return RenderSettings.sun;
+            Light[] lights = FindObjectsByType<Light>(FindObjectsSortMode.None);
+            for (int i = 0; i < lights.Length; i++)
+                if (lights[i].type == LightType.Directional) return lights[i];
+            return null;
         }
 
         // Apply the quality tier's cost knobs. Called once at startup, before the sim/caustic
@@ -537,7 +560,7 @@ namespace WebGLWater
             // Pass 1: visibility, plus a provisional "simulate" for visible + in-range bodies.
             for (int i = 0; i < Bodies.Count; i++)
             {
-                WaterController body = Bodies[i];
+                WaterVolume body = Bodies[i];
                 if (!body.enableCulling || cam == null)
                 {
                     body._visible = true;
@@ -555,7 +578,7 @@ namespace WebGLWater
         // Eligible to simulate = culling on, visible, and within the activation distance.
         // Recomputed (not read from _simulate) so the budget pass can rank without its own
         // writes skewing the counts.
-        static bool IsSimEligible(WaterController body, Vector3 camPos)
+        static bool IsSimEligible(WaterVolume body, Vector3 camPos)
         {
             if (!body.enableCulling || !body._visible) return false;
             float distSqr = (body.VolumeCenter - camPos).sqrMagnitude;
@@ -577,14 +600,14 @@ namespace WebGLWater
 
             for (int i = 0; i < Bodies.Count; i++)
             {
-                WaterController body = Bodies[i];
+                WaterVolume body = Bodies[i];
                 if (!IsSimEligible(body, camPos)) continue;
                 float d = (body.VolumeCenter - camPos).sqrMagnitude;
 
                 int nearer = 0;
                 for (int j = 0; j < Bodies.Count; j++)
                 {
-                    WaterController other = Bodies[j];
+                    WaterVolume other = Bodies[j];
                     if (other == body || !IsSimEligible(other, camPos)) continue;
                     float od = (other.VolumeCenter - camPos).sqrMagnitude;
                     if (od < d || (od == d && j < i)) nearer++; // stable tiebreak by registry index
@@ -740,6 +763,51 @@ namespace WebGLWater
 
             depthWorld = (surfaceH - pool.y) * VolumeExtentSafe.y; // pool depth -> world depth along up
             worldFlow = VolumeRotation * new Vector3(poolFlow.x, 0f, poolFlow.y);
+            return true;
+        }
+
+        // ---- gameplay façade -----------------------------------------------
+        // World-position-first wrappers over the sim primitives, so gameplay code (swimming,
+        // audio, VFX, projectiles) queries the water without touching x/z or internals. The
+        // static *At variants resolve the body that contains the point via BodyContaining.
+
+        /// <summary>World-space surface height (Y) at a world position's x,z on THIS body.
+        /// False until the first readback lands or if the point is outside the footprint.</summary>
+        public bool TrySampleHeight(Vector3 worldPos, out float worldY)
+            => TryGetWaterHeight(worldPos.x, worldPos.z, out worldY);
+
+        /// <summary>True if the world point is below THIS body's surface.</summary>
+        public bool IsSubmerged(Vector3 worldPos)
+            => TrySampleSubmersion(worldPos, out float depth, out _, out _) && depth > 0f;
+
+        /// <summary>Inject a ripple at a world position on THIS body (footsteps, projectiles,
+        /// boats). Radius/strength are world units; out-of-footprint calls are ignored.</summary>
+        public void SpawnRipple(Vector3 worldPos, float radius, float strength)
+            => AddRipple(worldPos.x, worldPos.z, radius, strength);
+
+        /// <summary>Surface height (Y) at a world position, resolving the body that contains it.
+        /// False if there is no water or the readback isn't ready / point is out of footprint.</summary>
+        public static bool TrySampleHeightAt(Vector3 worldPos, out float worldY)
+        {
+            worldY = 0f;
+            WaterVolume body = BodyContaining(worldPos);
+            return body != null && body.TrySampleHeight(worldPos, out worldY);
+        }
+
+        /// <summary>True if the world point is below the surface of whichever body contains it.</summary>
+        public static bool IsSubmergedAt(Vector3 worldPos)
+        {
+            WaterVolume body = BodyContaining(worldPos);
+            return body != null && body.IsSubmerged(worldPos);
+        }
+
+        /// <summary>Spawn a ripple at a world position on whichever body contains it. Returns
+        /// false if there is no water body to receive it.</summary>
+        public static bool TrySpawnRippleAt(Vector3 worldPos, float radius, float strength)
+        {
+            WaterVolume body = BodyContaining(worldPos);
+            if (body == null) return false;
+            body.SpawnRipple(worldPos, radius, strength);
             return true;
         }
 
@@ -926,10 +994,10 @@ namespace WebGLWater
         }
 
         // Nearest water body whose surface the ray hits (null = none, so we orbit instead).
-        static WaterController FindHitBody(Ray ray, out Vector3 worldHit)
+        static WaterVolume FindHitBody(Ray ray, out Vector3 worldHit)
         {
             worldHit = Vector3.zero;
-            WaterController best = null;
+            WaterVolume best = null;
             float bestSqr = float.MaxValue;
             for (int i = 0; i < Bodies.Count; i++)
             {
@@ -942,6 +1010,9 @@ namespace WebGLWater
 
         void HandleMouse()
         {
+            // No camera -> no rays to cast; skip input rather than NRE in PixelRay.
+            if (targetCamera == null) return;
+
             // While pinching (2+ fingers), don't ripple/orbit — let the camera zoom.
             if (MultiTouch()) { _mode = MODE_NONE; return; }
 

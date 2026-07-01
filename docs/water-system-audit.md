@@ -19,7 +19,7 @@ Two commits landed against this list (compile/behavior reviewed by a second pass
 - **Should-fix 6 + 13** (builder shader/property names → consts; optional-shader validation warnings).
 - **Should-fix 7 (partial)** (WaterQuality now derives `ThreadGroupSize` from `WaterSimulation`).
 - **Should-fix 15** (`WaterInteractable.Active` → `IReadOnlyList`).
-- **Magic numbers 16 (partial)** (WaterController camera consts + `activationDistance = CameraFarClip`
+- **Magic numbers 16 (partial)** (WaterVolume camera consts + `activationDistance = CameraFarClip`
   coupling + seed-ripple consts). **Nit 23/24** (dropped `StepSimulation` default args; `TwoPi = 2·π`).
 
 Second cleanup pass (2026-07-01):
@@ -79,7 +79,7 @@ gameplay results. Fix first.
    (C# side) don't push 0 to the shared material.
 
 4. **`WaterSplashEmitter.cs:75` — splash drift resolves to the primary body.**
-   `_controller = WaterController.Resolve(); // TODO(Phase 2): the body containing this emitter`. Splash
+   `_controller = WaterVolume.Resolve(); // TODO(Phase 2): the body containing this emitter`. Splash
    particles always drift on the primary lake regardless of which body was actually splashed — a
    multi-instance correctness gap left open (the shared emitter was out of Phase 2's scope). **Fix:**
    resolve the emitting body per splash (`BodyContaining` at the splash point) or pass the body in.
@@ -94,7 +94,7 @@ gameplay results. Fix first.
    `"Normal"`, `"Obstacle"`, `"Foam"`, `"Conserve"`), and `"_Size"`/`"_Delta"`/`"Src"`/`"Dst"`/`"_Center"`/
    `"_Radius"`/`"_Strength"`/`"ObstaclePrev"`/`"_FoamGenRate"`… repeated across methods (`"_Size"`/`"_Delta"`
    in three places). **Fix:** cache IDs in `static readonly int` via `Shader.PropertyToID` and hold kernel
-   names in consts — exactly as `WaterController.cs` already does.
+   names in consts — exactly as `WaterVolume.cs` already does.
 
 6. **`WaterSceneBuilder.cs` — material property & shader names hardcoded.** `m.SetFloat("_Underwater", 0f)`,
    `m.SetFloat("_Cull", 1f)` (×4), `m.SetColor("_BaseColor", …)`, and `Shader.Find("WebGLWater/WaterSurface")`
@@ -119,7 +119,7 @@ gameplay results. Fix first.
    (`WaterCommon`, `Caustics`, `GodRays`, `WaterReceiver`). **Fix:** one shared header — `IntersectCube`,
    the IOR defines, and a `ProjectCausticUV(poolPos, refractedLight)` helper — included everywhere.
 
-10. **`WaterController.cs` — `WriteBodyProps` vs the `Publish*` globals duplicate every value.** Fog, foam,
+10. **`WaterVolume.cs` — `WriteBodyProps` vs the `Publish*` globals duplicate every value.** Fog, foam,
     wave and volume uniforms are listed once for the MPB and again verbatim in `PublishFog`/`PublishFoam`/
     `PublishWaves`/`PublishVolume`. The MPB-vs-global split is *justified* (per-body renderers vs the
     global fallback for object shaders), but the value derivation shouldn't be written twice. **Fix:**
@@ -144,7 +144,7 @@ gameplay results. Fix first.
 
 ### API surface & immutability
 
-14. **Public serialized fields → `[SerializeField] private`.** `WaterController` (nearly every field:
+14. **Public serialized fields → `[SerializeField] private`.** `WaterVolume` (nearly every field:
     `public Renderer surfaceAbove;`, `public float windSpeed`, …) and `OrbitCamera` (yaw/pitch/distance/
     speeds/limits) expose a wide mutable surface. Inspector visibility doesn't require `public`. **Fix:**
     `[SerializeField] private` unless another script genuinely needs the field.
@@ -155,13 +155,13 @@ gameplay results. Fix first.
 
 ### Magic-number clusters (meaningful literals worth naming)
 
-16. **`WaterController.cs`** — seed ripples `20` / `0.03f` / `0.01f` (L314); camera `45f` / `0.01f` / `100f`
+16. **`WaterVolume.cs`** — seed ripples `20` / `0.03f` / `0.01f` (L314); camera `45f` / `0.01f` / `100f`
     where **`100f` silently duplicates the `activationDistance` default** its own tooltip says it "matches"
     (L318-320); splash `0.08f` / `0.1f` / `0.6f` / `4f` (L983). **Fix:** named consts; reference one
     far-clip const for both places.
 
 17. **`WaterObstacle.cs:43,48`** — ortho frustum `2f * ey`, `4f * ey + 0.02f`, near `0.01f`; plus a second
-    extent-clamp epsilon `1e-4f` that disagrees with `WaterController.VolumeExtentSafe`'s `1e-5f`. **Fix:**
+    extent-clamp epsilon `1e-4f` that disagrees with `WaterVolume.VolumeExtentSafe`'s `1e-5f`. **Fix:**
     name the frustum consts; pass the already-safe extent in so the epsilon is defined once.
 
 18. **`WaterSurface.shader`** — sun glint `float3(10,8,6)` + exponent `5000.0` (L178); peaked-refine loop

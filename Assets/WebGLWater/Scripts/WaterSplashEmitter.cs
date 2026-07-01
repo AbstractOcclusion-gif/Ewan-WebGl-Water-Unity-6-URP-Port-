@@ -2,12 +2,12 @@
 // Owns (or references) a real Particle System so the splash is fully editable in
 // the Inspector: select the "Splash Particles" object to tweak modules, and swap
 // the droplet texture on its ParticleSystemRenderer material. Both object impacts
-// (WaterSplash) and the mouse interaction (WaterController) emit through this.
+// (WaterSplash) and the mouse interaction (WaterVolume) emit through this.
 //
 // Droplets pop, then stick to the water surface and DRIFT with the waves: they
 // launch ballistically (low gravity), and once they reach the live waterline they
 // snap to it and are carried along the local surface flow, reacting as ripples
-// pass under them. The drift is driven on the CPU from WaterController's height
+// pass under them. The drift is driven on the CPU from WaterVolume's height
 // readback, so it tracks the same surface the shader renders.
 using UnityEngine;
 
@@ -94,7 +94,7 @@ namespace WebGLWater
             Vector3 position = droplet.position;
             // Resolve the body under THIS droplet so a splash in lake B drifts on lake B's
             // surface, not the primary's. Outside every footprint TryGetSurface returns false.
-            WaterController body = WaterController.BodyContaining(position);
+            WaterVolume body = WaterVolume.BodyContaining(position);
             if (body == null || !body.TryGetSurface(position.x, position.z, out float surfaceY, out Vector2 flow))
                 return; // outside the pool or no readback yet: stay ballistic
 

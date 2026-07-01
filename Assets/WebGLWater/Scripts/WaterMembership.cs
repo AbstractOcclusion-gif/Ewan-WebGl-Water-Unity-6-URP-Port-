@@ -25,7 +25,7 @@ namespace WebGLWater
         // (its Update runs at DefaultExecutionOrder -50) before we copy its uniforms.
         void LateUpdate()
         {
-            WaterController body = WaterController.BodyContaining(transform.position);
+            WaterVolume body = WaterVolume.BodyContaining(transform.position);
             if (body == null) return; // no water in the scene; keep the material's defaults
 
             body.WriteBodyProps(_mpb);

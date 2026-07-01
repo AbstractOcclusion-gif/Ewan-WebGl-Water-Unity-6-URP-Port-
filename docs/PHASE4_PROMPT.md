@@ -29,7 +29,7 @@ maps to world (x,z): `u↔x, v↔z`.
 **Coordinate convention:** pool spans `x,z ∈ [-1,1]`, water surface at `y = 0`,
 floor at `y = -1`, walls up to `y = 2/12`.
 
-**Controller** — `Scripts/WaterController.cs` orchestrates the sim, caustics, and
+**Controller** — `Scripts/WaterVolume.cs` orchestrates the sim, caustics, and
 object interaction, and publishes these **shader globals** each frame:
 `_WaterTex` (sim state), `_CausticTex` (`.r` = focus intensity, `.g` = occluder
 shadow = 1), `_Tiles`, `_Sky` (cubemap), `_LightDir` (toward the sun),

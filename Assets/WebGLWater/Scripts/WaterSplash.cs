@@ -45,7 +45,7 @@ namespace WebGLWater
         {
             Vector3 center = _rb.worldCenterOfMass;
             // Resolve from the object's position so a splash fires into the lake it enters.
-            WaterController body = WaterController.BodyContaining(center);
+            WaterVolume body = WaterVolume.BodyContaining(center);
             float surfaceY = 0f;
             if (body != null) body.TryGetWaterHeight(center.x, center.z, out surfaceY);
 

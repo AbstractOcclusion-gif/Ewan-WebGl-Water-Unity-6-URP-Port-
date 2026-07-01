@@ -18,7 +18,7 @@ namespace WebGLWater
 
         [Tooltip("Per-object RELATIVE weight on how strongly it displaces the water. Leave " +
                  "at 1 unless one object should push more or less than the others; the " +
-                 "master strength is 'Obstacle Strength' on the WaterController.")]
+                 "master strength is 'Obstacle Strength' on the WaterVolume.")]
         public float displaceScale = 1f;
 
         public Renderer Renderer { get; private set; }
@@ -45,7 +45,7 @@ namespace WebGLWater
             Bounds b = Renderer.bounds;
             // Resolve the body under the object each call so the waterline follows the lake
             // it is actually in, not a single body cached at startup.
-            WaterController ctrl = WaterController.BodyContaining(b.center);
+            WaterVolume ctrl = WaterVolume.BodyContaining(b.center);
             if (ctrl != null && ctrl.TryGetWaterHeight(b.center.x, b.center.z, out float surfaceY))
                 return surfaceY;
             return restY;
