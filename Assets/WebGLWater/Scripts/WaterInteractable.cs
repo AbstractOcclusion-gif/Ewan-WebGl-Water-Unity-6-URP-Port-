@@ -20,14 +20,9 @@ namespace WebGLWater
 
         public Renderer Renderer { get; private set; }
 
-        // Reads the local water surface height under this object so the footprint is
-        // referenced to the moving surface, not the flat rest plane.
-        WaterController _ctrl;
-
         void Awake()
         {
             Renderer = GetComponent<Renderer>();
-            _ctrl = WaterController.Resolve(); // TODO(Phase 2): the body containing this object
         }
         void OnEnable()
         {
@@ -45,7 +40,10 @@ namespace WebGLWater
         {
             if (Renderer == null) return restY;
             Bounds b = Renderer.bounds;
-            if (_ctrl != null && _ctrl.TryGetWaterHeight(b.center.x, b.center.z, out float surfaceY))
+            // Resolve the body under the object each call so the waterline follows the lake
+            // it is actually in, not a single body cached at startup.
+            WaterController ctrl = WaterController.BodyContaining(b.center);
+            if (ctrl != null && ctrl.TryGetWaterHeight(b.center.x, b.center.z, out float surfaceY))
                 return surfaceY;
             return restY;
         }

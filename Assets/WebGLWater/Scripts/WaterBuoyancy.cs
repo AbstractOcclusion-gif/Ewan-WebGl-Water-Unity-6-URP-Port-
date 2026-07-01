@@ -61,8 +61,7 @@ namespace WebGLWater
         void Start()
         {
             BuildSamplePoints();
-            _ctrl = WaterController.Resolve(); // TODO(Phase 2): the body containing this object
-            if (_ctrl == null)
+            if (WaterController.Resolve() == null)
                 Debug.LogWarning("WaterBuoyancy: no WaterController in the scene; object will not float.");
         }
 
@@ -116,6 +115,9 @@ namespace WebGLWater
 
         void FixedUpdate()
         {
+            // Re-resolve every step so an object that drifts between lakes floats on the one
+            // it is currently in (cheap: a handful of bodies).
+            _ctrl = WaterController.BodyContaining(transform.position);
             if (_ctrl == null || _localPoints == null || _localPoints.Length == 0) return;
 
             float g = Physics.gravity.magnitude;

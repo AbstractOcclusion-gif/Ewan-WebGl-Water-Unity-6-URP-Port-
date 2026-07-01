@@ -33,13 +33,14 @@ namespace WebGLWater
 
         void Start()
         {
-            _ctrl = WaterController.Resolve(); // TODO(Phase 2): the body containing this object
             if (emitter == null) emitter = FindFirstObjectByType<WaterSplashEmitter>();
         }
 
         void FixedUpdate()
         {
             Vector3 c = _rb.worldCenterOfMass;
+            // Resolve from the object's position so a splash fires into the lake it enters.
+            _ctrl = WaterController.BodyContaining(c);
             float surfaceY = 0f;
             if (_ctrl != null) _ctrl.TryGetWaterHeight(c.x, c.z, out surfaceY);
 

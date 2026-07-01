@@ -45,21 +45,45 @@ namespace WebGLWater
         public Renderer surfaceUnder;
         public Renderer poolRenderer;
         public Renderer godRayRenderer;
-        [Tooltip("The primary body also mirrors its data to global shader state so floating " +
-                 "objects and analytic receivers work. Exactly one body should be primary. " +
-                 "TODO(Phase 2): resolve each object's containing body instead of a single primary.")]
+        [Tooltip("The primary body also mirrors its data to global shader state, the fallback " +
+                 "for objects that don't carry a WaterMembership (which otherwise resolves each " +
+                 "object's own containing body). Exactly one body should be primary.")]
         public bool isPrimary = true;
 
-        /// <summary>The primary water body (drives objects/buoyancy until per-object
-        /// association exists). TODO(Phase 2): replace with per-object body resolution.</summary>
+        /// <summary>The primary water body: the global fallback for objects without a
+        /// <see cref="WaterMembership"/>. Per-object association goes through
+        /// <see cref="BodyContaining"/>.</summary>
         public static WaterController Primary { get; private set; }
 
-        /// <summary>Resolve the body an object should use. Phase 1: the primary body (or any
-        /// found body as a fallback). TODO(Phase 2): pick the body whose volume contains the object.</summary>
+        /// <summary>Resolve the body an object should use when it isn't inside any specific
+        /// one: the primary body, or any found body as a fallback. Prefer
+        /// <see cref="BodyContaining"/> for objects that have a world position.</summary>
         public static WaterController Resolve() => Primary != null ? Primary : FindFirstObjectByType<WaterController>();
 
+        /// <summary>The water body a world point belongs to: the body whose horizontal
+        /// footprint contains the point, nearest-centre wins when several overlap, and the
+        /// primary body as a fallback when the point is outside every footprint. Objects call
+        /// this each frame so they float on, and are lit by, the lake they are actually in.</summary>
+        public static WaterController BodyContaining(Vector3 worldPoint)
+        {
+            WaterController best = null;
+            float bestSqr = float.MaxValue;
+            for (int i = 0; i < Bodies.Count; i++)
+            {
+                WaterController body = Bodies[i];
+                if (!body.WorldToPoolXZ(worldPoint, out _, out _)) continue;
+
+                // Tiebreak on HORIZONTAL distance to centre; the footprint ignores height,
+                // so a vertical gap between the point and a body must not sway the choice.
+                Vector3 toCenter = body.VolumeCenter - worldPoint;
+                float sqr = toCenter.x * toCenter.x + toCenter.z * toCenter.z;
+                if (sqr < bestSqr) { bestSqr = sqr; best = body; }
+            }
+            return best != null ? best : Resolve();
+        }
+
         /// <summary>All live water bodies. Used by the primary's input router to send a
-        /// click to whichever body's surface the ray hits.</summary>
+        /// click to whichever body's surface the ray hits, and by <see cref="BodyContaining"/>.</summary>
         static readonly List<WaterController> Bodies = new List<WaterController>();
 
         [Header("Simulation")]
@@ -295,8 +319,8 @@ namespace WebGLWater
             UpdateCaustics();           // renders THIS body's caustic RT from its own sim
 
             ApplyBodyBlock();           // per-body uniforms -> this body's renderers (MPB)
-            // Primary bridge: mirror this body's data to globals so floating objects and the
-            // analytic receivers work. TODO(Phase 2): resolve each object's containing body.
+            // Primary bridge: mirror this body's data to globals as the fallback for objects
+            // without a WaterMembership (those resolve their own containing body instead).
             if (isPrimary) PublishBodyGlobals();
 
             RequestHeightReadback();
@@ -318,40 +342,49 @@ namespace WebGLWater
         void ApplyBodyBlock()
         {
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
-            _mpb.Clear();
-
-            if (_water != null)
-            {
-                _mpb.SetTexture(ID_Water, _water.Texture);
-                if (_water.FoamTexture != null) _mpb.SetTexture(ID_FoamMask, _water.FoamTexture);
-            }
-            if (_causticRT != null) _mpb.SetTexture(ID_Caustic, _causticRT);
-
-            _mpb.SetVector(ID_VolumeCenter, VolumeCenter);
-            _mpb.SetVector(ID_VolumeExtent, VolumeExtentSafe);
-            _mpb.SetMatrix(ID_VolumeRot, Matrix4x4.Rotate(VolumeRotation));
-
-            _mpb.SetVectorArray(ID_WaveA, _waveBank.PackedA);
-            _mpb.SetVectorArray(ID_WaveB, _waveBank.PackedB);
-            _mpb.SetFloat(ID_WaveCount, windWaves ? _waveBank.Count : 0f);
-            _mpb.SetFloat(ID_WaveMeters, WaveMetersPerUnit);
-            _mpb.SetFloat(ID_WaveNormal, waveNormalStrength);
-
-            _mpb.SetColor(ID_FogColor, fogColor);
-            _mpb.SetColor(ID_FogExt, fogExtinction);
-            _mpb.SetFloat(ID_FogDensity, fogDensity);
-            _mpb.SetFloat(ID_FogEnabled, waterFog ? 1f : 0f);
-
-            _mpb.SetColor(ID_FoamColor, foamColor);
-            _mpb.SetFloat(ID_FoamEnabled, foam ? 1f : 0f);
-            _mpb.SetFloat(ID_FoamStrength, foamStrength);
-            _mpb.SetFloat(ID_FoamBorder, foamBorderWidth);
-            _mpb.SetFloat(ID_FoamContact, foamContactDepth);
+            WriteBodyProps(_mpb);
 
             ApplyBlockTo(surfaceAbove);
             ApplyBlockTo(surfaceUnder);
             ApplyBlockTo(poolRenderer);
             ApplyBlockTo(godRayRenderer);
+        }
+
+        /// <summary>Overwrite <paramref name="mpb"/> with this body's per-renderer uniforms
+        /// (sim + caustic textures, volume frame, waves, fog, foam). Used for this body's own
+        /// renderers and by <see cref="WaterMembership"/> to light a floating object with the
+        /// lake it is in. The block is cleared, so any per-object look must live in the material.</summary>
+        public void WriteBodyProps(MaterialPropertyBlock mpb)
+        {
+            mpb.Clear();
+
+            if (_water != null)
+            {
+                mpb.SetTexture(ID_Water, _water.Texture);
+                if (_water.FoamTexture != null) mpb.SetTexture(ID_FoamMask, _water.FoamTexture);
+            }
+            if (_causticRT != null) mpb.SetTexture(ID_Caustic, _causticRT);
+
+            mpb.SetVector(ID_VolumeCenter, VolumeCenter);
+            mpb.SetVector(ID_VolumeExtent, VolumeExtentSafe);
+            mpb.SetMatrix(ID_VolumeRot, Matrix4x4.Rotate(VolumeRotation));
+
+            mpb.SetVectorArray(ID_WaveA, _waveBank.PackedA);
+            mpb.SetVectorArray(ID_WaveB, _waveBank.PackedB);
+            mpb.SetFloat(ID_WaveCount, windWaves ? _waveBank.Count : 0f);
+            mpb.SetFloat(ID_WaveMeters, WaveMetersPerUnit);
+            mpb.SetFloat(ID_WaveNormal, waveNormalStrength);
+
+            mpb.SetColor(ID_FogColor, fogColor);
+            mpb.SetColor(ID_FogExt, fogExtinction);
+            mpb.SetFloat(ID_FogDensity, fogDensity);
+            mpb.SetFloat(ID_FogEnabled, waterFog ? 1f : 0f);
+
+            mpb.SetColor(ID_FoamColor, foamColor);
+            mpb.SetFloat(ID_FoamEnabled, foam ? 1f : 0f);
+            mpb.SetFloat(ID_FoamStrength, foamStrength);
+            mpb.SetFloat(ID_FoamBorder, foamBorderWidth);
+            mpb.SetFloat(ID_FoamContact, foamContactDepth);
         }
 
         void ApplyBlockTo(Renderer r) { if (r != null) r.SetPropertyBlock(_mpb); }

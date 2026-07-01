@@ -98,6 +98,7 @@ namespace WebGLWater.EditorTools
             crate.AddComponent<WaterInteractable>();  // object -> water (displacement)
             crate.AddComponent<WaterBuoyancy>();       // water -> object (floats)
             crate.AddComponent<WaterSplash>();         // droplet burst on impact
+            crate.AddComponent<WaterMembership>();      // lit by the lake it is actually in
 
             // ---- underwater god-ray volume (caustic-masked light shafts) ----
             var sfGodRays = Shader.Find("WebGLWater/GodRays");
