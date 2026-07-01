@@ -65,8 +65,10 @@ namespace WebGLWater
         [Header("Tier: Low (WebGPU / mobile)")]
         [Min(ThreadGroupSize)] public int lowSimResolution = 128;
         [Min(MinCausticResolution)] public int lowCausticResolution = 256;
-        [Range(0, 64)] public int lowGodRaySteps = 0;
-        public bool lowGodRays = false;
+        // God rays kept ON at reduced steps: cheap enough for the WebGPU/mobile budget, and the
+        // scene reads wrong without them (they were the main thing lost on the constrained build).
+        [Range(0, 64)] public int lowGodRaySteps = 12;
+        public bool lowGodRays = true;
 
         /// <summary>The active tier: the forced one, or the capability-probed one under Auto.</summary>
         public Tier Resolve()

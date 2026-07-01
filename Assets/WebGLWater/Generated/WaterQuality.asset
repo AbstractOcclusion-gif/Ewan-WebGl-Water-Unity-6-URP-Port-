@@ -23,5 +23,5 @@ MonoBehaviour:
   mediumGodRays: 1
   lowSimResolution: 128
   lowCausticResolution: 256
-  lowGodRaySteps: 0
-  lowGodRays: 0
+  lowGodRaySteps: 12
+  lowGodRays: 1

@@ -48,9 +48,13 @@ Shader "WebGLWater/WaterSurface"
             #pragma vertex vert
             #pragma fragment frag
             #pragma target 4.0
-            #pragma shader_feature_local _USE_PLANAR
-            #pragma shader_feature_local _USE_SSR
-            #pragma shader_feature_local _REAL_REFRACTION
+            // multi_compile (not shader_feature) so the build ships ALL variants: the reflection
+            // mode is toggled at runtime per body (WaterVolume.ApplyReflectionKeywords), and
+            // shader_feature would strip the runtime keyword combo that no material baked, making
+            // the surface fall back to the flat analytic look in a build.
+            #pragma multi_compile_local _ _USE_PLANAR
+            #pragma multi_compile_local _ _USE_SSR
+            #pragma multi_compile_local _ _REAL_REFRACTION
             #include "UnityCG.cginc"
             #include "WaterCommon.hlsl"
             #include "WaterFog.hlsl"

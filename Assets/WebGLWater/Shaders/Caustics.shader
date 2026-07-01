@@ -57,7 +57,12 @@ Shader "WebGLWater/Caustics"
                 o.oldPos = project(v.vertex.xzy, refractedLight, refractedLight);
                 o.newPos = project(v.vertex.xzy + float3(0.0, info.r, 0.0), ray, refractedLight);
 
-                o.pos = float4(CAUSTIC_PROJECTION_SCALE * (o.newPos.xz + refractedLight.xz / refractedLight.y), 0.0, 1.0);
+                // Raw clip-space output (no MVP), so compensate the platform/context render-target
+                // Y-flip ourselves: _ProjectionParams.x is -1 when Unity renders flipped (e.g. via an
+                // intermediate target under the Mobile URP asset / WebGPU), which otherwise mirrors the
+                // caustic RT vs the desktop editor and shifts everything that samples _CausticTex.
+                float2 cpos = CAUSTIC_PROJECTION_SCALE * (o.newPos.xz + refractedLight.xz / refractedLight.y);
+                o.pos = float4(cpos.x, cpos.y * _ProjectionParams.x, 0.0, 1.0);
                 return o;
             }
 

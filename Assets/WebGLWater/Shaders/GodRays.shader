@@ -9,6 +9,12 @@
 // light's realtime shadow at that point, so floating objects carve dark silhouette
 // beams through the haze WITHOUT losing the caustic shimmer that reads as underwater.
 //
+// REQUIRES "Transparent Receive Shadows" ENABLED on the active URP asset: this pass is in the
+// Transparent queue, and URP only feeds the main-light shadow to transparent passes when that
+// toggle is on. With it OFF, MainLightRealtimeShadow returns "lit" for every marched sample and
+// the shadow shafts silently vanish (they then only read where caustics brighten, not on calm
+// water). This bit us on the Mobile URP asset / WebGPU build, where the toggle defaulted off.
+//
 // Renders after the water (Transparent+100), additively, ignoring the water surface
 // depth; occlusion against solid geometry is done per-step against the camera depth
 // texture (opaque geometry only).
