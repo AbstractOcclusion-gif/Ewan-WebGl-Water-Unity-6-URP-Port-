@@ -204,6 +204,7 @@ namespace WebGLWater.EditorTools
             ctrl.splashEmitter = splashEmitter;
             ctrl.tiles = tiles;
             ctrl.sky = sky;
+            ctrl.quality = LoadOrCreateWaterQuality(Gen + "/WaterQuality.asset");
 
             // Multi-instance: this body drives its own renderers via a property block.
             ctrl.surfaceAbove = above.GetComponent<Renderer>();
@@ -254,6 +255,7 @@ namespace WebGLWater.EditorTools
             ctrl.sun = primary.sun;
             ctrl.tiles = primary.tiles;
             ctrl.sky = primary.sky;
+            ctrl.quality = primary.quality; // share the scene's quality tier
             ctrl.volumeExtent = primary.volumeExtent;
             ctrl.isPrimary = false; // only ONE body mirrors to globals
 
@@ -548,6 +550,17 @@ namespace WebGLWater.EditorTools
             if (existing != null) { EditorUtility.CopySerialized(c, existing); return existing; }
             AssetDatabase.CreateAsset(c, path);
             return c;
+        }
+
+        // Reuse the existing quality asset if present (so hand-tuned tiers survive a rebuild),
+        // otherwise create one with the default tiers.
+        static WaterQuality LoadOrCreateWaterQuality(string path)
+        {
+            var existing = AssetDatabase.LoadAssetAtPath<WaterQuality>(path);
+            if (existing != null) return existing;
+            var q = ScriptableObject.CreateInstance<WaterQuality>();
+            AssetDatabase.CreateAsset(q, path);
+            return q;
         }
     }
 }

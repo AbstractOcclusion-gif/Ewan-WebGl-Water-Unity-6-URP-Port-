@@ -7,7 +7,12 @@ namespace WebGLWater
 {
     public class WaterSimulation
     {
-        public const int Resolution = 256;
+        // The compute shader dispatches in 8x8 thread groups, so the grid must be a positive
+        // multiple of this.
+        public const int ThreadGroupSize = 8;
+
+        /// <summary>Grid resolution of the heightfield RTs (per side). Set per quality tier.</summary>
+        public int Resolution { get; }
 
         readonly ComputeShader _cs;
         readonly int _kDrop, _kUpdate, _kNormal, _kObstacle, _kFoam, _kConserve;
@@ -23,8 +28,15 @@ namespace WebGLWater
         /// <summary>The current foam amount texture (R channel).</summary>
         public RenderTexture FoamTexture => _foamA;
 
-        public WaterSimulation(ComputeShader cs)
+        public WaterSimulation(ComputeShader cs, int resolution)
         {
+            if (cs == null) throw new System.ArgumentNullException(nameof(cs));
+            if (resolution < ThreadGroupSize || resolution % ThreadGroupSize != 0)
+                throw new System.ArgumentException(
+                    $"WaterSimulation resolution must be a positive multiple of {ThreadGroupSize}, got {resolution}.",
+                    nameof(resolution));
+
+            Resolution = resolution;
             _cs = cs;
             _kDrop   = cs.FindKernel("Drop");
             _kUpdate = cs.FindKernel("Update");
@@ -32,7 +44,7 @@ namespace WebGLWater
             _kObstacle = cs.FindKernel("Obstacle");
             _kFoam = cs.FindKernel("Foam");
             _kConserve = cs.FindKernel("Conserve");
-            _groups = Resolution / 8;
+            _groups = Resolution / ThreadGroupSize;
 
             _a = Create(RenderTextureFormat.ARGBFloat, "WaterSimState");
             _b = Create(RenderTextureFormat.ARGBFloat, "WaterSimState");
@@ -41,7 +53,7 @@ namespace WebGLWater
             Clear(_a); Clear(_b); Clear(_foamA); Clear(_foamB);
         }
 
-        static RenderTexture Create(RenderTextureFormat format, string name)
+        RenderTexture Create(RenderTextureFormat format, string name)
         {
             var rt = new RenderTexture(Resolution, Resolution, 0, format)
             {

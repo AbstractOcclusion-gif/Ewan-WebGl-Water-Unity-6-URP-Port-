@@ -50,6 +50,19 @@ namespace WebGLWater
                  "object's own containing body). Exactly one body should be primary.")]
         public bool isPrimary = true;
 
+        [Header("Performance (Phase 3)")]
+        [Tooltip("Quality tier asset scaling sim/caustic resolution and god-ray steps. Leave " +
+                 "empty for the default (256/1024/24) look. Assigned by the scene builder.")]
+        public WaterQuality quality;
+        [Tooltip("Pause a body's simulation, caustics and height readback - and stop drawing it - " +
+                 "when it is off-screen OR beyond Activation Distance, and let only the nearest few " +
+                 "bodies simulate at once. A single visible body is unaffected. Turn off to force " +
+                 "this body to always simulate and render.")]
+        public bool enableCulling = true;
+        [Tooltip("Bodies whose centre is farther than this from the camera pause their simulation " +
+                 "(they hold their last state). Matches the camera far clip by default.")]
+        public float activationDistance = 100f;
+
         /// <summary>The primary water body: the global fallback for objects without a
         /// <see cref="WaterMembership"/>. Per-object association goes through
         /// <see cref="BodyContaining"/>.</summary>
@@ -186,7 +199,8 @@ namespace WebGLWater
         // CPU copy of the height field for buoyancy queries
         Color[] _heightCpu;
         bool _heightReady, _readbackInFlight;
-        const int SimRes = WaterSimulation.Resolution;
+        int _simRes = WaterQuality.Default.SimResolution; // grid resolution, set from the quality tier at OnEnable
+        bool _godRaysAllowed = true;                       // false when the tier turns god rays off
         Material _causticMat;
         RenderTexture _causticRT;
         RenderTexture _heightMip;
@@ -194,6 +208,17 @@ namespace WebGLWater
         MaterialPropertyBlock _mpb; // per-body uniforms pushed to this body's renderers
 
         bool _paused;
+
+        // ---- sim culling / active-sim budget (Phase 3) ----
+        // Only the nearest bodies simulate each frame; off-screen bodies also stop drawing.
+        // The schedule is computed once per frame (frame-guarded) for ALL bodies, so it is
+        // independent of the arbitrary order in which the bodies Update.
+        const int ActiveSimBudget = 4;        // nearest bodies allowed to simulate at once
+        const float WaveHeightMargin = 0.1f;  // pool-space headroom above y=0 for wind-wave crests in the cull box
+        static readonly Plane[] _frustumPlanes = new Plane[6];
+        static int _scheduleFrame = -1;
+        bool _visible = true;   // inside the camera frustum -> its renderers draw
+        bool _simulate = true;  // visible AND in range AND within the sim budget -> runs the GPU sim
 
         // interaction (only the primary body runs this; it routes clicks to the hit body)
         const int MODE_NONE = -1, MODE_ADD_DROPS = 0, MODE_ORBIT = 2;
@@ -235,15 +260,18 @@ namespace WebGLWater
         static readonly int ID_VolumeCenter = Shader.PropertyToID("_VolumeCenter");
         static readonly int ID_VolumeExtent = Shader.PropertyToID("_VolumeExtent");
         static readonly int ID_VolumeRot = Shader.PropertyToID("_VolumeRot");
+        static readonly int ID_GodRaySteps = Shader.PropertyToID("_GodRaySteps");
 
         void OnEnable()
         {
             if (simCompute == null) { Debug.LogError("WaterController: simCompute not assigned."); enabled = false; return; }
 
-            _water = new WaterSimulation(simCompute);
+            ApplyQuality();     // sets _simRes, causticResolution, _godRaysAllowed + god-ray steps
+
+            _water = new WaterSimulation(simCompute, _simRes);
 
             if (obstacleShader != null)
-                _obstacle = new WaterObstacle(obstacleShader, WaterSimulation.Resolution,
+                _obstacle = new WaterObstacle(obstacleShader, _simRes,
                                               VolumeCenter, VolumeRotation, VolumeExtentSafe);
 
             _causticMat = new Material(causticsShader);
@@ -256,7 +284,7 @@ namespace WebGLWater
             _causticRT.Create();
             _cb = new CommandBuffer { name = "WebGLWater.Caustics" };
 
-            _heightMip = new RenderTexture(WaterSimulation.Resolution, WaterSimulation.Resolution, 0, RenderTextureFormat.RFloat)
+            _heightMip = new RenderTexture(_simRes, _simRes, 0, RenderTextureFormat.RFloat)
             {
                 useMipMap = true,
                 autoGenerateMips = false,
@@ -300,6 +328,23 @@ namespace WebGLWater
             _cb?.Release();
         }
 
+        // Apply the quality tier's cost knobs. Called once at startup, before the sim/caustic
+        // RTs are created, so the resolutions are fixed for the session (a tier change takes
+        // effect on restart). With no asset assigned the inspector defaults are left untouched
+        // (_simRes stays at its default), so existing scenes are unaffected.
+        void ApplyQuality()
+        {
+            if (quality == null) return;
+
+            WaterQuality.Tier tier = quality.Resolve();
+            _simRes = tier.SimResolution;
+            causticResolution = tier.CausticResolution;
+            _godRaysAllowed = tier.GodRays;
+
+            if (godRayRenderer != null && godRayRenderer.sharedMaterial != null)
+                godRayRenderer.sharedMaterial.SetFloat(ID_GodRaySteps, tier.GodRaySteps);
+        }
+
         void Update()
         {
             // Input is a scene-level concern: only the primary body handles mouse/keys and
@@ -311,19 +356,30 @@ namespace WebGLWater
                 HandleMouse();
             }
 
+            // Decide (once per frame, for every body) which bodies draw and which run the
+            // heavy GPU sim, then stop drawing this one if it is off-screen.
+            EnsureSchedule();
+            SetRenderersEnabled(_visible);
+
             float dt = Time.deltaTime;
-            if (!_paused) { Step(dt); _waveTime += dt; }
+            if (!_paused)
+            {
+                // The analytic wind waves are driven by the shared clock, so they keep moving
+                // even on a budget-paused (but visible) body; only the GPU sim is gated.
+                _waveTime += dt;
+                if (_simulate) Step(dt);
+            }
 
             PublishSharedGlobals();     // sun, sky, tiles, camera-independent shared clock
             EnsureWaveBank();
-            UpdateCaustics();           // renders THIS body's caustic RT from its own sim
+            if (_simulate) UpdateCaustics();  // renders THIS body's caustic RT from its own sim
 
             ApplyBodyBlock();           // per-body uniforms -> this body's renderers (MPB)
             // Primary bridge: mirror this body's data to globals as the fallback for objects
             // without a WaterMembership (those resolve their own containing body instead).
             if (isPrimary) PublishBodyGlobals();
 
-            RequestHeightReadback();
+            if (_simulate) RequestHeightReadback();  // paused bodies keep their last height (objects still float)
         }
 
         // Genuinely shared across all bodies: the sun, the environment, and the wave clock.
@@ -388,6 +444,113 @@ namespace WebGLWater
         }
 
         void ApplyBlockTo(Renderer r) { if (r != null) r.SetPropertyBlock(_mpb); }
+
+        // ---- sim culling schedule (Phase 3) ---------------------------------
+        // Sets _visible / _simulate for EVERY live body, once per frame. Frame-guarded so
+        // whichever body Updates first does the work and the rest reuse it (order-independent).
+        static void EnsureSchedule()
+        {
+            if (_scheduleFrame == Time.frameCount) return;
+            _scheduleFrame = Time.frameCount;
+
+            Camera cam = ScheduleCamera();
+            if (cam != null) GeometryUtility.CalculateFrustumPlanes(cam, _frustumPlanes);
+
+            // Pass 1: visibility, plus a provisional "simulate" for visible + in-range bodies.
+            for (int i = 0; i < Bodies.Count; i++)
+            {
+                WaterController body = Bodies[i];
+                if (!body.enableCulling || cam == null)
+                {
+                    body._visible = true;
+                    body._simulate = true; // culling off -> always draw + simulate
+                    continue;
+                }
+                body._visible = GeometryUtility.TestPlanesAABB(_frustumPlanes, body.CullBounds());
+                body._simulate = IsSimEligible(body, cam.transform.position);
+            }
+
+            // Pass 2: cap the simulating set to the nearest ActiveSimBudget eligible bodies.
+            EnforceSimBudget(cam);
+        }
+
+        // Eligible to simulate = culling on, visible, and within the activation distance.
+        // Recomputed (not read from _simulate) so the budget pass can rank without its own
+        // writes skewing the counts.
+        static bool IsSimEligible(WaterController body, Vector3 camPos)
+        {
+            if (!body.enableCulling || !body._visible) return false;
+            float distSqr = (body.VolumeCenter - camPos).sqrMagnitude;
+            return distSqr <= body.activationDistance * body.activationDistance;
+        }
+
+        // Keep only the nearest ActiveSimBudget eligible bodies simulating; pause the rest.
+        // The body count is small, so an O(n^2) "how many eligible bodies are nearer than me"
+        // rank avoids allocating a sorted list each frame.
+        static void EnforceSimBudget(Camera cam)
+        {
+            if (cam == null) return;
+            Vector3 camPos = cam.transform.position;
+
+            int eligible = 0;
+            for (int i = 0; i < Bodies.Count; i++)
+                if (IsSimEligible(Bodies[i], camPos)) eligible++;
+            if (eligible <= ActiveSimBudget) return;
+
+            for (int i = 0; i < Bodies.Count; i++)
+            {
+                WaterController body = Bodies[i];
+                if (!IsSimEligible(body, camPos)) continue;
+                float d = (body.VolumeCenter - camPos).sqrMagnitude;
+
+                int nearer = 0;
+                for (int j = 0; j < Bodies.Count; j++)
+                {
+                    WaterController other = Bodies[j];
+                    if (other == body || !IsSimEligible(other, camPos)) continue;
+                    float od = (other.VolumeCenter - camPos).sqrMagnitude;
+                    if (od < d || (od == d && j < i)) nearer++; // stable tiebreak by registry index
+                }
+                if (nearer >= ActiveSimBudget) body._simulate = false;
+            }
+        }
+
+        // Prefer the primary's camera; fall back to any body's camera, then the main camera.
+        static Camera ScheduleCamera()
+        {
+            if (Primary != null && Primary.targetCamera != null) return Primary.targetCamera;
+            for (int i = 0; i < Bodies.Count; i++)
+                if (Bodies[i].targetCamera != null) return Bodies[i].targetCamera;
+            return Camera.main;
+        }
+
+        // World-space AABB of this body's volume (pool box x,z in [-1,1], y in [-1,0]) plus a
+        // little headroom for wind-wave crests. The renderers keep huge bounds to avoid wrong
+        // culling under the volume transform, so frustum culling tests this real box instead.
+        Bounds CullBounds()
+        {
+            Bounds b = new Bounds(PoolToWorld(new Vector3(-1f, -1f, -1f)), Vector3.zero);
+            b.Encapsulate(PoolToWorld(new Vector3( 1f, -1f, -1f)));
+            b.Encapsulate(PoolToWorld(new Vector3(-1f, -1f,  1f)));
+            b.Encapsulate(PoolToWorld(new Vector3( 1f, -1f,  1f)));
+            b.Encapsulate(PoolToWorld(new Vector3(-1f, WaveHeightMargin, -1f)));
+            b.Encapsulate(PoolToWorld(new Vector3( 1f, WaveHeightMargin, -1f)));
+            b.Encapsulate(PoolToWorld(new Vector3(-1f, WaveHeightMargin,  1f)));
+            b.Encapsulate(PoolToWorld(new Vector3( 1f, WaveHeightMargin,  1f)));
+            return b;
+        }
+
+        void SetRenderersEnabled(bool on)
+        {
+            SetRendererEnabled(surfaceAbove, on);
+            SetRendererEnabled(surfaceUnder, on);
+            SetRendererEnabled(poolRenderer, on);
+            // God rays obey the quality tier as well as culling: a tier that disables them
+            // keeps the renderer off even when the body is on-screen.
+            SetRendererEnabled(godRayRenderer, on && _godRaysAllowed);
+        }
+
+        static void SetRendererEnabled(Renderer r, bool on) { if (r != null && r.enabled != on) r.enabled = on; }
 
         // Mirror this (primary) body's per-body data to global shader state, so objects and
         // the analytic receivers - which still read globals in Phase 1 - follow this body.
@@ -513,9 +676,9 @@ namespace WebGLWater
         Color SamplePoolTexel(float poolX, float poolZ)
         {
             float u = poolX * 0.5f + 0.5f, v = poolZ * 0.5f + 0.5f;
-            int px = Mathf.Clamp((int)(u * SimRes), 0, SimRes - 1);
-            int pz = Mathf.Clamp((int)(v * SimRes), 0, SimRes - 1);
-            return _heightCpu[pz * SimRes + px];
+            int px = Mathf.Clamp((int)(u * _simRes), 0, _simRes - 1);
+            int pz = Mathf.Clamp((int)(v * _simRes), 0, _simRes - 1);
+            return _heightCpu[pz * _simRes + px];
         }
 
         void Step(float seconds)
