@@ -142,6 +142,9 @@ namespace WebGLWater.EditorTools
             if (planar == null) planar = cam.gameObject.AddComponent<PlanarReflection>();
             planar.sourceCamera = cam;
             planar.waterHeight = 0f;
+            // Off until a body opts into Planar mode (its OnEnable turns it on + tracks its
+            // plane). Bodies default to SSR, so nothing samples the planar texture otherwise.
+            planar.enableReflection = false;
 
             // Single directional light: drives the analytic water + caustics (via the
             // _LightDir global the controller publishes) AND casts real URP shadows.

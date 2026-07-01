@@ -63,6 +63,15 @@ namespace WebGLWater
                  "(they hold their last state). Matches the camera far clip by default.")]
         public float activationDistance = 100f;
 
+        public enum ReflectionMode { SkyOnly, SSR, Planar }
+
+        [Header("Reflections (Phase 3c)")]
+        [Tooltip("How THIS body reflects. SSR (screen-space over the procedural sky) scales to many " +
+                 "bodies. Planar is a full extra scene render across this body's plane - use it for at " +
+                 "most ONE 'hero' body. SkyOnly is cheapest (procedural sky only). SSR needs Depth + " +
+                 "Opaque Texture enabled on the active URP asset.")]
+        public ReflectionMode reflectionMode = ReflectionMode.SSR;
+
         /// <summary>The primary water body: the global fallback for objects without a
         /// <see cref="WaterMembership"/>. Per-object association goes through
         /// <see cref="BodyContaining"/>.</summary>
@@ -201,6 +210,11 @@ namespace WebGLWater
         bool _heightReady, _readbackInFlight;
         int _simRes = WaterQuality.Default.SimResolution; // grid resolution, set from the quality tier at OnEnable
         bool _godRaysAllowed = true;                       // false when the tier turns god rays off
+        // Per-body surface material instances so reflection keywords don't leak across bodies
+        // that share the source material. Created at OnEnable, destroyed at OnDisable.
+        Material _surfaceAboveInstance, _surfaceUnderInstance;
+        const string KW_SSR = "_USE_SSR";
+        const string KW_PLANAR = "_USE_PLANAR";
         Material _causticMat;
         RenderTexture _causticRT;
         RenderTexture _heightMip;
@@ -309,6 +323,7 @@ namespace WebGLWater
             if (isPrimary) Primary = this;
             if (!Bodies.Contains(this)) Bodies.Add(this);
             _mpb = new MaterialPropertyBlock();
+            ApplyReflections();
 
             PublishSharedGlobals();
             EnsureWaveBank();
@@ -326,6 +341,8 @@ namespace WebGLWater
             if (_causticRT != null) _causticRT.Release();
             if (_heightMip != null) _heightMip.Release();
             _cb?.Release();
+            if (_surfaceAboveInstance != null) { Destroy(_surfaceAboveInstance); _surfaceAboveInstance = null; }
+            if (_surfaceUnderInstance != null) { Destroy(_surfaceUnderInstance); _surfaceUnderInstance = null; }
         }
 
         // Apply the quality tier's cost knobs. Called once at startup, before the sim/caustic
@@ -343,6 +360,53 @@ namespace WebGLWater
 
             if (godRayRenderer != null && godRayRenderer.sharedMaterial != null)
                 godRayRenderer.sharedMaterial.SetFloat(ID_GodRaySteps, tier.GodRaySteps);
+        }
+
+        // Give the surface renderers per-body material instances and set their reflection
+        // keywords from reflectionMode, so bodies in different modes don't fight over one
+        // shared material. A Planar body also binds the scene's single planar reflection.
+        void ApplyReflections()
+        {
+            _surfaceAboveInstance = InstanceSurfaceMaterial(surfaceAbove);
+            _surfaceUnderInstance = InstanceSurfaceMaterial(surfaceUnder);
+            ApplyReflectionKeywords(_surfaceAboveInstance);
+            ApplyReflectionKeywords(_surfaceUnderInstance);
+
+            if (reflectionMode == ReflectionMode.Planar) BindHeroPlanar();
+        }
+
+        // Replace the renderer's shared material with a per-body instance (play-mode only, so
+        // the scene asset is untouched; the instance is destroyed in OnDisable).
+        static Material InstanceSurfaceMaterial(Renderer r)
+        {
+            if (r == null || r.sharedMaterial == null) return null;
+            var instance = new Material(r.sharedMaterial);
+            r.sharedMaterial = instance;
+            return instance;
+        }
+
+        void ApplyReflectionKeywords(Material m)
+        {
+            if (m == null) return;
+            SetKeyword(m, KW_SSR, reflectionMode == ReflectionMode.SSR);
+            SetKeyword(m, KW_PLANAR, reflectionMode == ReflectionMode.Planar);
+        }
+
+        static void SetKeyword(Material m, string keyword, bool on)
+        {
+            if (on) m.EnableKeyword(keyword); else m.DisableKeyword(keyword);
+        }
+
+        // Point the scene's planar reflection at THIS body's plane and turn it on. The planar
+        // texture is a single global plane, so only one hero body should use Planar mode; with
+        // several, the last to enable at OnEnable wins.
+        void BindHeroPlanar()
+        {
+            if (targetCamera == null) return;
+            var planar = targetCamera.GetComponent<PlanarReflection>();
+            if (planar == null) return;
+            planar.enableReflection = true;
+            planar.waterHeight = transform.position.y;
         }
 
         void Update()
