@@ -40,8 +40,12 @@ Third cleanup pass (2026-07-01) — **shared shader header**:
   Fresnel bases, pool-rim height, `PoolWall` boost, `Caustics` focus). Covers audit items 9, 17, 18, 19,
   22, 24, 25 and shader-findings 7, 8 (rim), 10.
 
-**Still open** (next passes): MPB-vs-global de-dup (10); per-frame body-resolution cache (11); `Build`
-decomposition (12); `public`→`[SerializeField] private` (14, needs care — the builder writes many of
+Fourth cleanup pass (2026-07-01): **`Build` decomposition (12)** — the ~200-line editor `Build()` split
+into `CreateWaterMaterials` / `CreateDemoObjects` / `CreateGodRays` / `SetUpCamera` / `CreateSun` /
+`CreateSplashEmitter`, leaving controller wiring as the orchestration core (Unity: no compile errors).
+
+**Still open** (next passes): MPB-vs-global de-dup (10); per-frame body-resolution cache (11);
+`public`→`[SerializeField] private` (14, needs care — the builder writes many of
 these, best done with the packaging asmdefs); a few remaining single-use shader nits (`WaterSurface`
 peaked-refine `5`/`0.005` and foam-nudge `0.1`, the analytic box `float3(1,2,1)` y-max, the
 `WaterCommon`/`Caustics` `length(p)`/`sqrt` guards — findings 9, 12, 13, 16); and deleting the deprecated

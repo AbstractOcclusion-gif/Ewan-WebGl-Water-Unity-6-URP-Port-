@@ -72,18 +72,7 @@ namespace WebGLWater.EditorTools
             var tiles = LoadOrBuildTiles(Gen + "/Tiles.png");
 
             // ---- materials ----
-            // _Cull maps to UnityEngine.Rendering.CullMode: the above-water pass culls front
-            // faces, the underwater pass and the pool interior cull back faces.
-            float cullFront = (float)UnityEngine.Rendering.CullMode.Front;
-            float cullBack = (float)UnityEngine.Rendering.CullMode.Back;
-            var matAbove = SaveMaterial(MakeMat(sfWater, m => { m.SetFloat(PropUnderwater, 0f); m.SetFloat(PropCull, cullFront); }),
-                                        Gen + "/WaterAbove.mat");
-            var matUnder = SaveMaterial(MakeMat(sfWater, m => { m.SetFloat(PropUnderwater, 1f); m.SetFloat(PropCull, cullBack); }),
-                                        Gen + "/WaterUnder.mat");
-
-            Material matPool = null;
-            if (buildAnalyticPool && sfPool != null)
-                matPool = SaveMaterial(MakeMat(sfPool, m => m.SetFloat(PropCull, cullBack)), Gen + "/Pool.mat");
+            var (matAbove, matUnder, matPool) = CreateWaterMaterials(sfWater, sfPool, buildAnalyticPool);
 
             // ---- scene objects ----
             var root = new GameObject("WebGL Water");
@@ -99,122 +88,14 @@ namespace WebGLWater.EditorTools
             }
 
             // ---- demo interaction: a floor to catch objects + a falling crate ----
-            // (Phase 3a shows the water reacting; Phase 3b buoyancy will make it float.)
-            var floor = new GameObject("Pool Floor Collider");
-            floor.transform.SetParent(root.transform);
-            floor.transform.position = new Vector3(0f, -1.05f, 0f);
-            floor.AddComponent<BoxCollider>().size = new Vector3(2f, 0.1f, 2f);
-
-            var crate = GameObject.CreatePrimitive(PrimitiveType.Cube); // brings a BoxCollider
-            crate.name = "Floating Crate (demo)";
-            crate.transform.SetParent(root.transform);
-            crate.transform.position = new Vector3(0.15f, 0.7f, -0.1f);
-            crate.transform.localScale = Vector3.one * 0.3f;
-            if (sfReceiver != null)
-            {
-                var crateMat = new Material(sfReceiver);
-                crateMat.SetColor(PropBaseColor, new Color(0.82f, 0.52f, 0.30f));
-                crate.GetComponent<MeshRenderer>().sharedMaterial = crateMat;
-            }
-            var rb = crate.AddComponent<Rigidbody>();
-            rb.mass = 0.4f;
-            crate.AddComponent<WaterInteractable>();  // object -> water (displacement)
-            crate.AddComponent<WaterBuoyancy>();       // water -> object (floats)
-            crate.AddComponent<WaterSplash>();         // droplet burst on impact
-            crate.AddComponent<WaterMembership>();      // lit by the lake it is actually in
+            CreateDemoObjects(root.transform, sfReceiver);
 
             // ---- underwater god-ray volume (caustic-masked light shafts) ----
-            var sfGodRays = Shader.Find(ShaderGodRays);
-            GameObject godGO = null;
-            if (sfGodRays != null)
-            {
-                // Pool-space box ([-1,0] in y, [-1,1] in x,z) with an IDENTITY transform;
-                // the GodRays shader places it via the volume frame, like the surface/pool.
-                godGO = CreateRenderer("God Rays", SaveAsset(BuildGodRayBox(), Gen + "/GodRayBox.asset"),
-                                       new Material(sfGodRays), root.transform);
-                var gmr = godGO.GetComponent<MeshRenderer>();
-                gmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                gmr.receiveShadows = false;
-            }
+            GameObject godGO = CreateGodRays(root.transform);
 
-            // camera - reuse the scene's main camera if there is one (avoids
-            // two cameras rendering on top of each other).
-            var cam = Camera.main;
-            if (cam == null)
-            {
-                var camGO = new GameObject("Water Camera");
-                cam = camGO.AddComponent<Camera>();
-                camGO.tag = "MainCamera";
-            }
-            cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.backgroundColor = Color.black;
-            cam.fieldOfView = 45f;
-            cam.nearClipPlane = 0.01f;
-            cam.farClipPlane = 100f;
-
-            var orbit = cam.GetComponent<OrbitCamera>();
-            if (orbit == null) orbit = cam.gameObject.AddComponent<OrbitCamera>();
-            orbit.pivot = new Vector3(0f, -0.5f, 0f);
-            orbit.pitch = -25f;
-            orbit.yaw = -200.5f;
-            orbit.distance = 4f;
-
-            // planar reflection of the real scene across the water plane (y = 0).
-            // Tickable per-material via "Use Planar Reflection"; harmless if unused.
-            var planar = cam.GetComponent<PlanarReflection>();
-            if (planar == null) planar = cam.gameObject.AddComponent<PlanarReflection>();
-            planar.sourceCamera = cam;
-            planar.waterHeight = 0f;
-            // Off until a body opts into Planar mode (its OnEnable turns it on + tracks its
-            // plane). Bodies default to SSR, so nothing samples the planar texture otherwise.
-            planar.enableReflection = false;
-
-            // Single directional light: drives the analytic water + caustics (via the
-            // _LightDir global the controller publishes) AND casts real URP shadows.
-            var sunGO = new GameObject("Sun");
-            sunGO.transform.SetParent(root.transform);
-            var sun = sunGO.AddComponent<Light>();
-            sun.type = LightType.Directional;
-            sun.shadows = LightShadows.Soft;
-            sun.intensity = 1.2f;
-            // lightDir is "toward the light"; the light itself travels the opposite way.
-            sun.transform.rotation = Quaternion.LookRotation(-new Vector3(2f, 2f, -1f).normalized);
-
-            // Shared, fully editable splash particles (used by object impacts + mouse).
-            // Select "Splash Particles" to tune the system or swap the droplet texture.
-            var splashGO = new GameObject("Splash Particles");
-            splashGO.transform.SetParent(root.transform);
-            var splashPS = splashGO.AddComponent<ParticleSystem>();
-            WaterSplashEmitter.ConfigureForDrift(splashPS);
-            var splashPSR = splashGO.GetComponent<ParticleSystemRenderer>();
-            var sfSprite = Shader.Find(ShaderSpritesDefault);
-            if (sfSprite != null)
-            {
-                var dm = new Material(sfSprite) { mainTexture = LoadOrBuildDroplet(Gen + "/Droplet.png") };
-                dm.color = new Color(0.92f, 0.97f, 1f, 1f);
-                splashPSR.sharedMaterial = dm;
-            }
-            splashPSR.renderMode = ParticleSystemRenderMode.Billboard;
-            var splashEmitter = splashGO.AddComponent<WaterSplashEmitter>();
-            splashEmitter.particles = splashPS;
-
-            // Crown splash: a separate system that plays the splash flipbook once per
-            // impact. Vertical billboard + base pivot so the crown stands on the water.
-            var crownGO = new GameObject("Splash Crown");
-            crownGO.transform.SetParent(root.transform);
-            var crownPS = crownGO.AddComponent<ParticleSystem>();
-            WaterSplashEmitter.ConfigureCrown(crownPS, 8, 8);
-            var crownPSR = crownGO.GetComponent<ParticleSystemRenderer>();
-            crownPSR.renderMode = ParticleSystemRenderMode.VerticalBillboard;
-            crownPSR.pivot = new Vector3(0f, 0.5f, 0f);
-            var crownSheet = LoadFlipbook(Gen + "/SplashFlipbook_8x8.png", TextureWrapMode.Clamp, false);
-            if (sfSprite != null && crownSheet != null)
-            {
-                var cm = new Material(sfSprite) { mainTexture = crownSheet };
-                cm.color = new Color(0.95f, 0.98f, 1f, 1f);
-                crownPSR.sharedMaterial = cm;
-            }
-            splashEmitter.crownParticles = crownPS;
+            Camera cam = SetUpCamera(out OrbitCamera orbit);
+            Light sun = CreateSun(root.transform);
+            WaterSplashEmitter splashEmitter = CreateSplashEmitter(root.transform);
 
             // controller
             var ctrlGO = new GameObject("Water Controller");
@@ -247,6 +128,155 @@ namespace WebGLWater.EditorTools
             Debug.Log("[WebGL Water] Scene built. Press Play.  " +
                       (buildAnalyticPool ? "Analytic pool included." : "No pool created - using your own.") +
                       "  Assign your pool tile texture to the Water Controller's 'Tiles' field for matching reflections.");
+        }
+
+        // The above-water pass culls front faces; the underwater pass and the pool interior
+        // cull back faces (_Cull maps to UnityEngine.Rendering.CullMode).
+        static (Material above, Material under, Material pool) CreateWaterMaterials(Shader sfWater, Shader sfPool, bool buildAnalyticPool)
+        {
+            float cullFront = (float)UnityEngine.Rendering.CullMode.Front;
+            float cullBack = (float)UnityEngine.Rendering.CullMode.Back;
+            var above = SaveMaterial(MakeMat(sfWater, m => { m.SetFloat(PropUnderwater, 0f); m.SetFloat(PropCull, cullFront); }),
+                                     Gen + "/WaterAbove.mat");
+            var under = SaveMaterial(MakeMat(sfWater, m => { m.SetFloat(PropUnderwater, 1f); m.SetFloat(PropCull, cullBack); }),
+                                     Gen + "/WaterUnder.mat");
+            Material pool = null;
+            if (buildAnalyticPool && sfPool != null)
+                pool = SaveMaterial(MakeMat(sfPool, m => m.SetFloat(PropCull, cullBack)), Gen + "/Pool.mat");
+            return (above, under, pool);
+        }
+
+        // Demo interaction: a floor to catch objects + a falling crate carrying the two-way
+        // coupling components. Nothing here is wired to the controller, so it returns void.
+        static void CreateDemoObjects(Transform parent, Shader sfReceiver)
+        {
+            var floor = new GameObject("Pool Floor Collider");
+            floor.transform.SetParent(parent);
+            floor.transform.position = new Vector3(0f, -1.05f, 0f);
+            floor.AddComponent<BoxCollider>().size = new Vector3(2f, 0.1f, 2f);
+
+            var crate = GameObject.CreatePrimitive(PrimitiveType.Cube); // brings a BoxCollider
+            crate.name = "Floating Crate (demo)";
+            crate.transform.SetParent(parent);
+            crate.transform.position = new Vector3(0.15f, 0.7f, -0.1f);
+            crate.transform.localScale = Vector3.one * 0.3f;
+            if (sfReceiver != null)
+            {
+                var crateMat = new Material(sfReceiver);
+                crateMat.SetColor(PropBaseColor, new Color(0.82f, 0.52f, 0.30f));
+                crate.GetComponent<MeshRenderer>().sharedMaterial = crateMat;
+            }
+            var rb = crate.AddComponent<Rigidbody>();
+            rb.mass = 0.4f;
+            crate.AddComponent<WaterInteractable>();  // object -> water (displacement)
+            crate.AddComponent<WaterBuoyancy>();       // water -> object (floats)
+            crate.AddComponent<WaterSplash>();         // droplet burst on impact
+            crate.AddComponent<WaterMembership>();      // lit by the lake it is actually in
+        }
+
+        // Underwater god-ray volume (caustic-masked light shafts). Returns null if the shader
+        // is missing (the feature is simply absent then).
+        static GameObject CreateGodRays(Transform parent)
+        {
+            var sfGodRays = Shader.Find(ShaderGodRays);
+            if (sfGodRays == null) return null;
+
+            // Pool-space box ([-1,0] in y, [-1,1] in x,z) with an IDENTITY transform;
+            // the GodRays shader places it via the volume frame, like the surface/pool.
+            var go = CreateRenderer("God Rays", SaveAsset(BuildGodRayBox(), Gen + "/GodRayBox.asset"),
+                                    new Material(sfGodRays), parent);
+            var gmr = go.GetComponent<MeshRenderer>();
+            gmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            gmr.receiveShadows = false;
+            return go;
+        }
+
+        // Reuse the scene's main camera if there is one (avoids two cameras rendering on top
+        // of each other), then attach the orbit + planar-reflection helpers.
+        static Camera SetUpCamera(out OrbitCamera orbit)
+        {
+            var cam = Camera.main;
+            if (cam == null)
+            {
+                var camGO = new GameObject("Water Camera");
+                cam = camGO.AddComponent<Camera>();
+                camGO.tag = "MainCamera";
+            }
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = Color.black;
+            cam.fieldOfView = 45f;
+            cam.nearClipPlane = 0.01f;
+            cam.farClipPlane = 100f;
+
+            orbit = cam.GetComponent<OrbitCamera>();
+            if (orbit == null) orbit = cam.gameObject.AddComponent<OrbitCamera>();
+            orbit.pivot = new Vector3(0f, -0.5f, 0f);
+            orbit.pitch = -25f;
+            orbit.yaw = -200.5f;
+            orbit.distance = 4f;
+
+            // Planar reflection across the water plane (y = 0). Off until a body opts into
+            // Planar mode; bodies default to SSR, so nothing samples it otherwise.
+            var planar = cam.GetComponent<PlanarReflection>();
+            if (planar == null) planar = cam.gameObject.AddComponent<PlanarReflection>();
+            planar.sourceCamera = cam;
+            planar.waterHeight = 0f;
+            planar.enableReflection = false;
+            return cam;
+        }
+
+        // Single directional light: drives the analytic water + caustics (via the _LightDir
+        // global the controller publishes) AND casts real URP shadows.
+        static Light CreateSun(Transform parent)
+        {
+            var sunGO = new GameObject("Sun");
+            sunGO.transform.SetParent(parent);
+            var sun = sunGO.AddComponent<Light>();
+            sun.type = LightType.Directional;
+            sun.shadows = LightShadows.Soft;
+            sun.intensity = 1.2f;
+            // lightDir is "toward the light"; the light itself travels the opposite way.
+            sun.transform.rotation = Quaternion.LookRotation(-new Vector3(2f, 2f, -1f).normalized);
+            return sun;
+        }
+
+        // Shared, fully editable splash particles (drift droplets + a flipbook crown), used by
+        // object impacts and the mouse interaction.
+        static WaterSplashEmitter CreateSplashEmitter(Transform parent)
+        {
+            var splashGO = new GameObject("Splash Particles");
+            splashGO.transform.SetParent(parent);
+            var splashPS = splashGO.AddComponent<ParticleSystem>();
+            WaterSplashEmitter.ConfigureForDrift(splashPS);
+            var splashPSR = splashGO.GetComponent<ParticleSystemRenderer>();
+            var sfSprite = Shader.Find(ShaderSpritesDefault);
+            if (sfSprite != null)
+            {
+                var dm = new Material(sfSprite) { mainTexture = LoadOrBuildDroplet(Gen + "/Droplet.png") };
+                dm.color = new Color(0.92f, 0.97f, 1f, 1f);
+                splashPSR.sharedMaterial = dm;
+            }
+            splashPSR.renderMode = ParticleSystemRenderMode.Billboard;
+            var splashEmitter = splashGO.AddComponent<WaterSplashEmitter>();
+            splashEmitter.particles = splashPS;
+
+            // Crown splash: a separate system that plays the splash flipbook once per impact.
+            var crownGO = new GameObject("Splash Crown");
+            crownGO.transform.SetParent(parent);
+            var crownPS = crownGO.AddComponent<ParticleSystem>();
+            WaterSplashEmitter.ConfigureCrown(crownPS, 8, 8);
+            var crownPSR = crownGO.GetComponent<ParticleSystemRenderer>();
+            crownPSR.renderMode = ParticleSystemRenderMode.VerticalBillboard;
+            crownPSR.pivot = new Vector3(0f, 0.5f, 0f);
+            var crownSheet = LoadFlipbook(Gen + "/SplashFlipbook_8x8.png", TextureWrapMode.Clamp, false);
+            if (sfSprite != null && crownSheet != null)
+            {
+                var cm = new Material(sfSprite) { mainTexture = crownSheet };
+                cm.color = new Color(0.95f, 0.98f, 1f, 1f);
+                crownPSR.sharedMaterial = cm;
+            }
+            splashEmitter.crownParticles = crownPS;
+            return splashEmitter;
         }
 
         // Adds a SECOND (non-primary) water body next to the primary, sharing the sun,
